@@ -6,6 +6,16 @@ defmodule Quicksand do
   with pre-registered Elixir callback functions callable from JS.
   Each runtime runs on a dedicated OS thread with configurable
   memory and time limits.
+
+  ## Reserved JS globals
+
+  When using `eval/3` in callback mode, quicksand installs four
+  `globalThis.__quicksand_*` properties on the JS runtime:
+  `__quicksand_make_wrapper`, `__quicksand_dispatch`,
+  `__quicksand_cb_args`, `__quicksand_cb_result`. User JavaScript
+  must not overwrite these or the callback machinery silently
+  breaks for that runtime. See `README.md` for the full list and
+  rationale.
   """
 
   @default_timeout 30_000

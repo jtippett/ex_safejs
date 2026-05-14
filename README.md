@@ -148,6 +148,17 @@ Quicksand.alive?(rt)  # false
 | `:memory_limit` | integer (bytes) | `268_435_456` (256 MB) | Max JS heap allocation |
 | `:max_stack_size` | integer (bytes) | `1_048_576` (1 MB) | Max JS call stack size |
 
+### Reserved global names
+
+When `eval/3` is in callback mode, quicksand installs four `globalThis.__quicksand_*` properties on the JS runtime to plumb callback dispatch:
+
+- `__quicksand_make_wrapper` — factory that builds the Elixir-callback wrapper functions injected as JS globals.
+- `__quicksand_dispatch` — called by the wrapper to message the Elixir process.
+- `__quicksand_cb_args` — slot the wrapper writes per-call arguments into.
+- `__quicksand_cb_result` — slot Elixir writes the result into.
+
+Don't define these in your user JS — overwriting them silently breaks all Elixir callbacks in that runtime. The leading double-underscore is a convention signaling "implementation detail, don't touch", matching the same convention QuickJS-NG uses internally.
+
 ## Type Conversion
 
 ### JS to Elixir
