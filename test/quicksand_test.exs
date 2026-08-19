@@ -331,14 +331,41 @@ defmodule QuicksandTest do
     end
 
     test "runtime usable after memory limit exceeded" do
-      # Use a larger limit so QuickJS can GC and recover after OOM
+      # Allocate inside a function so the memory is reclaimable once the OOM
+      # unwinds. A top-level `const arr` global would pin the runtime at the
+      # cap, and with quickjs-ng 0.15's stricter accounting every later
+      # eval then legitimately OOMs too — that's the guest's fault, not a
+      # recovery failure.
       {:ok, rt} = Quicksand.start(memory_limit: 2 * 1024 * 1024)
 
-      assert {:error, _} =
-               Quicksand.eval(rt, "const arr = []; while(true) { arr.push('x'.repeat(1000)); }")
+      assert {:error, msg} =
+               Quicksand.eval(
+                 rt,
+                 "(function() { const arr = []; while(true) { arr.push('x'.repeat(1000)); } })()"
+               )
 
+      assert msg =~ "out of memory"
       assert {:ok, 1} = Quicksand.eval(rt, "1")
       Quicksand.stop(rt)
+    end
+
+    test "timeout during a pending promise job does not abort the VM" do
+      # Regression test for a BEAM-killing SIGABRT (issue #2): with rquickjs
+      # 0.11 the interrupt handler firing inside a pending job corrupted
+      # refcounts, and freeing the runtime hit the `gc_decref_child`
+      # assertion in quickjs.c — taking the whole node down. Fixed by
+      # rquickjs 0.12 (upstream bug DelSkayn/rquickjs#663).
+      {:ok, rt} = Quicksand.start(timeout: 300)
+
+      assert {:error, "timeout"} =
+               Quicksand.eval(rt, "Promise.resolve().then(() => { while(true) {} }); 1")
+
+      # The abort fired on free; stopping cleanly is the regression check.
+      :ok = Quicksand.stop(rt)
+
+      {:ok, rt2} = Quicksand.start()
+      assert {:ok, 42} = Quicksand.eval(rt2, "40 + 2")
+      Quicksand.stop(rt2)
     end
 
     test "stack overflow" do
