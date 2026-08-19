@@ -8,5 +8,5 @@ name = "ex_safejs"
 crate-type = ["cdylib"]
 
 [dependencies]
-rustler = { version = "0.37", default-features = false, features = ["derive", "nif_version_2_15"] }
+rustler = { version = "0.37", default-features = false, features = ["derive", "nif_version_2_15", "big_integer"] }
 rquickjs = { version = "0.12", features = ["bindgen", "parallel"] }

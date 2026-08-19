@@ -2,6 +2,8 @@ defmodule ExSafejsTest do
   use ExUnit.Case
   use ExUnitProperties
 
+  alias ExSafejs.Error
+
   describe "start/stop" do
     test "start and stop runtime" do
       {:ok, rt} = ExSafejs.start()
@@ -22,14 +24,14 @@ defmodule ExSafejsTest do
     test "eval on stopped runtime returns error" do
       {:ok, rt} = ExSafejs.start()
       ExSafejs.stop(rt)
-      assert {:error, "dead_runtime"} = ExSafejs.eval(rt, "1")
+      assert {:error, %Error{kind: :dead_runtime}} = ExSafejs.eval(rt, "1")
     end
 
     test "eval with callbacks on stopped runtime returns error" do
       {:ok, rt} = ExSafejs.start()
       ExSafejs.stop(rt)
       callbacks = %{"f" => fn [] -> {:ok, nil} end}
-      assert {:error, "dead_runtime"} = ExSafejs.eval(rt, "f()", callbacks)
+      assert {:error, %Error{kind: :dead_runtime}} = ExSafejs.eval(rt, "f()", callbacks)
     end
 
     test "alive? returns true for running runtime" do
@@ -89,6 +91,40 @@ defmodule ExSafejsTest do
       assert {:ok, -9_007_199_254_740_991} = ExSafejs.eval(rt, "-Number.MAX_SAFE_INTEGER")
     end
 
+    test "BigInt crosses losslessly", %{rt: rt} do
+      # Beyond 2^53 an f64 silently truncates (9007199254740993 would come
+      # back as ...992); BigInt must round-trip exact in both directions.
+      assert {:ok, 9_007_199_254_740_993} = ExSafejs.eval(rt, "9007199254740993n")
+      assert {:ok, -9_007_199_254_740_993} = ExSafejs.eval(rt, "-9007199254740993n")
+
+      # Beyond i64, still exact (arbitrary precision path).
+      huge = 123_456_789_012_345_678_901_234_567_890
+      assert {:ok, ^huge} = ExSafejs.eval(rt, "#{huge}n")
+    end
+
+    test "integers beyond 2^53 cross as BigInt into JS", %{rt: rt} do
+      big = 9_007_199_254_740_993
+      callbacks = %{"big" => fn [] -> {:ok, big} end}
+
+      assert {:ok, ["bigint", true]} =
+               ExSafejs.eval(rt, "[typeof big(), big() === 9007199254740993n]", callbacks)
+
+      # And back out unchanged.
+      assert {:ok, ^big} = ExSafejs.eval(rt, "big()", callbacks)
+
+      # Beyond i64 too, via the decimal-string path.
+      huge = 340_282_366_920_938_463_463_374_607_431_768_211_456
+      callbacks = %{"huge" => fn [] -> {:ok, huge} end}
+      assert {:ok, ^huge} = ExSafejs.eval(rt, "huge()", callbacks)
+    end
+
+    test "BigInt arguments reach callbacks exactly", %{rt: rt} do
+      callbacks = %{"echo" => fn [v] -> {:ok, v} end}
+
+      assert {:ok, 9_007_199_254_740_993} =
+               ExSafejs.eval(rt, "echo(9007199254740993n)", callbacks)
+    end
+
     test "NaN and Infinity become nil", %{rt: rt} do
       assert {:ok, nil} = ExSafejs.eval(rt, "NaN")
       assert {:ok, nil} = ExSafejs.eval(rt, "Infinity")
@@ -117,18 +153,25 @@ defmodule ExSafejsTest do
     end
 
     test "syntax error", %{rt: rt} do
-      assert {:error, msg} = ExSafejs.eval(rt, "function {")
+      assert {:error, %Error{kind: :js_error, message: msg}} =
+               ExSafejs.eval(rt, "function {")
+
       assert is_binary(msg)
     end
 
     test "runtime error", %{rt: rt} do
-      assert {:error, msg} = ExSafejs.eval(rt, "undefinedVar.prop")
-      assert is_binary(msg)
+      assert {:error, %Error{kind: :js_error, message: msg}} =
+               ExSafejs.eval(rt, "undefinedVar.prop")
+
+      assert msg =~ "undefinedVar"
     end
 
     test "thrown error", %{rt: rt} do
-      assert {:error, msg} = ExSafejs.eval(rt, "throw new Error('boom')")
+      assert {:error, %Error{kind: :js_error, message: msg, stack: stack}} =
+               ExSafejs.eval(rt, "throw new Error('boom')")
+
       assert msg =~ "boom"
+      assert is_binary(stack)
     end
 
     test "global state persists", %{rt: rt} do
@@ -203,7 +246,9 @@ defmodule ExSafejsTest do
         "fail" => fn _args -> {:error, "something went wrong"} end
       }
 
-      assert {:error, msg} = ExSafejs.eval(rt, "fail()", callbacks)
+      assert {:error, %Error{kind: :js_error, message: msg}} =
+               ExSafejs.eval(rt, "fail()", callbacks)
+
       assert msg =~ "something went wrong"
     end
 
@@ -212,7 +257,10 @@ defmodule ExSafejsTest do
         "blow_up" => fn _args -> raise "kaboom" end
       }
 
-      assert {:error, msg} = ExSafejs.eval(rt, "blow_up()", callbacks)
+      assert {:error, %Error{kind: :host_error, message: msg}} =
+               ExSafejs.eval(rt, "blow_up()", callbacks)
+
+      assert msg =~ "blow_up"
       assert msg =~ "kaboom"
     end
 
@@ -232,23 +280,33 @@ defmodule ExSafejsTest do
 
     test "invalid callback return shape becomes error", %{rt: rt} do
       callbacks = %{"bad" => fn [] -> "bare string" end}
-      assert {:error, msg} = ExSafejs.eval(rt, "bad()", callbacks)
-      assert msg =~ "Invalid callback result"
+
+      assert {:error, %Error{kind: :host_error, message: msg}} =
+               ExSafejs.eval(rt, "bad()", callbacks)
+
+      assert msg =~ "invalid result"
+      assert msg =~ "bare string"
     end
 
     test "callback arity mismatch gives clear error", %{rt: rt} do
       callbacks = %{"greet" => fn [name] -> {:ok, "Hi #{name}"} end}
-      assert {:error, msg} = ExSafejs.eval(rt, "greet('a', 'b')", callbacks)
-      assert msg =~ "Callback 'greet'"
-      assert msg =~ "no matching clause for 2 arg(s)"
+
+      assert {:error, %Error{kind: :host_error, message: msg}} =
+               ExSafejs.eval(rt, "greet('a', 'b')", callbacks)
+
+      assert msg =~ "greet"
+      assert msg =~ "no function clause"
     end
 
     test "callback with wrong fun arity gives clear error", %{rt: rt} do
       # fn that takes two args instead of one (the args list)
       callbacks = %{"bad" => fn _a, _b -> {:ok, nil} end}
-      assert {:error, msg} = ExSafejs.eval(rt, "bad(1)", callbacks)
-      assert msg =~ "Callback 'bad'"
-      assert msg =~ "function must accept a single argument"
+
+      assert {:error, %Error{kind: :host_error, message: msg}} =
+               ExSafejs.eval(rt, "bad(1)", callbacks)
+
+      assert msg =~ "bad"
+      assert msg =~ "arity"
     end
 
     test "callback returning nil", %{rt: rt} do
@@ -296,13 +354,13 @@ defmodule ExSafejsTest do
   describe "resource limits" do
     test "timeout" do
       {:ok, rt} = ExSafejs.start(timeout: 100)
-      assert {:error, "timeout"} = ExSafejs.eval(rt, "while(true) {}")
+      assert {:error, %Error{kind: :timeout}} = ExSafejs.eval(rt, "while(true) {}")
       ExSafejs.stop(rt)
     end
 
     test "runtime usable after timeout" do
       {:ok, rt} = ExSafejs.start(timeout: 100)
-      assert {:error, "timeout"} = ExSafejs.eval(rt, "while(true) {}")
+      assert {:error, %Error{kind: :timeout}} = ExSafejs.eval(rt, "while(true) {}")
       assert {:ok, 42} = ExSafejs.eval(rt, "21 * 2")
       ExSafejs.stop(rt)
     end
@@ -314,7 +372,7 @@ defmodule ExSafejsTest do
         "noop" => fn [] -> {:ok, nil} end
       }
 
-      assert {:error, "timeout"} =
+      assert {:error, %Error{kind: :timeout}} =
                ExSafejs.eval(rt, "noop(); while(true) {}", callbacks)
 
       assert {:ok, 1} = ExSafejs.eval(rt, "1")
@@ -344,13 +402,14 @@ defmodule ExSafejsTest do
       # platforms (seen on Linux x86_64 CI while macOS ARM passed).
       {:ok, rt} = ExSafejs.start(memory_limit: 8 * 1024 * 1024)
 
-      assert {:error, msg} =
+      assert {:error, err} =
                ExSafejs.eval(
                  rt,
                  "(function() { const arr = []; while(true) { arr.push('x'.repeat(1 << 20)); } })()"
                )
 
-      assert msg =~ "out of memory"
+      assert %Error{kind: :memory_limit} = err
+      assert err.message =~ "out of memory"
       assert {:ok, 1} = ExSafejs.eval(rt, "1")
       ExSafejs.stop(rt)
     end
@@ -363,7 +422,7 @@ defmodule ExSafejsTest do
       # rquickjs 0.12 (upstream bug DelSkayn/rquickjs#663).
       {:ok, rt} = ExSafejs.start(timeout: 300)
 
-      assert {:error, "timeout"} =
+      assert {:error, %Error{kind: :timeout}} =
                ExSafejs.eval(rt, "Promise.resolve().then(() => { while(true) {} }); 1")
 
       # The abort fired on free; stopping cleanly is the regression check.
@@ -376,7 +435,10 @@ defmodule ExSafejsTest do
 
     test "stack overflow" do
       {:ok, rt} = ExSafejs.start()
-      assert {:error, msg} = ExSafejs.eval(rt, "function f() { return f(); } f()")
+
+      assert {:error, %Error{kind: :stack_overflow, message: msg}} =
+               ExSafejs.eval(rt, "function f() { return f(); } f()")
+
       assert is_binary(msg)
       ExSafejs.stop(rt)
     end
@@ -421,8 +483,192 @@ defmodule ExSafejsTest do
 
     test "ex_safejs_result atom with error", %{rt: rt} do
       callbacks = %{"fail" => fn [] -> {:error, "nope"} end}
-      assert {:error, msg} = ExSafejs.eval(rt, "fail()", callbacks)
+
+      assert {:error, %Error{kind: :js_error, message: msg}} =
+               ExSafejs.eval(rt, "fail()", callbacks)
+
       assert msg =~ "nope"
+    end
+  end
+
+  describe "async-aware eval" do
+    setup do
+      {:ok, rt} = ExSafejs.start()
+      on_exit(fn -> ExSafejs.stop(rt) end)
+      %{rt: rt}
+    end
+
+    test "async arrow settles to its value", %{rt: rt} do
+      assert {:ok, 3} = ExSafejs.eval(rt, "(async () => 1 + 2)()")
+    end
+
+    test "await on a callback result", %{rt: rt} do
+      callbacks = %{"add" => fn [a, b] -> {:ok, a + b} end}
+      assert {:ok, 5} = ExSafejs.eval(rt, "(async () => await add(2, 3))()", callbacks)
+    end
+
+    test "pure .then chain settles inside the drain", %{rt: rt} do
+      assert {:ok, 2} = ExSafejs.eval(rt, "Promise.resolve(1).then(x => x + 1)")
+    end
+
+    test "Promise.all over callback results", %{rt: rt} do
+      callbacks = %{"double" => fn [n] -> {:ok, n * 2} end}
+
+      code = """
+      (async () => {
+        const [a, b, c] = await Promise.all([double(1), double(2), double(3)]);
+        return a + b + c;
+      })()
+      """
+
+      assert {:ok, 12} = ExSafejs.eval(rt, code, callbacks)
+    end
+
+    test "async throw comes back as a structured js_error", %{rt: rt} do
+      assert {:error, %Error{kind: :js_error, message: msg}} =
+               ExSafejs.eval(rt, "(async () => { throw new Error('async boom') })()")
+
+      assert msg =~ "async boom"
+    end
+
+    test "rejected promise comes back as a structured js_error", %{rt: rt} do
+      assert {:error, %Error{kind: :js_error, message: msg}} =
+               ExSafejs.eval(rt, "Promise.reject(new Error('rejected!'))")
+
+      assert msg =~ "rejected!"
+    end
+
+    test "never-settling promise is a deadlock, not a burned timeout", %{rt: rt} do
+      started = System.monotonic_time(:millisecond)
+
+      assert {:error, %Error{kind: :deadlock, message: msg}} =
+               ExSafejs.eval(rt, "new Promise(() => {})")
+
+      # Detected immediately — nowhere near the 30s default timeout.
+      assert System.monotonic_time(:millisecond) - started < 1_000
+      assert msg =~ "pending"
+    end
+
+    test "await on a never-settling promise is a deadlock", %{rt: rt} do
+      assert {:error, %Error{kind: :deadlock}} =
+               ExSafejs.eval(rt, "(async () => await new Promise(() => {}))()")
+    end
+
+    test "infinite loop after an await still times out" do
+      {:ok, rt} = ExSafejs.start(timeout: 200)
+
+      assert {:error, %Error{kind: :timeout}} =
+               ExSafejs.eval(rt, "(async () => { await Promise.resolve(); while(true) {} })()")
+
+      assert {:ok, 1} = ExSafejs.eval(rt, "1")
+      ExSafejs.stop(rt)
+    end
+
+    test "guest recovers from a caught async rejection", %{rt: rt} do
+      code = """
+      (async () => {
+        try {
+          await Promise.reject(new Error('handled'));
+        } catch (e) {
+          return 'caught: ' + e.message;
+        }
+      })()
+      """
+
+      assert {:ok, "caught: handled"} = ExSafejs.eval(rt, code)
+    end
+  end
+
+  describe "deadline excludes host-call time" do
+    test "a slow callback does not burn the JS budget" do
+      {:ok, rt} = ExSafejs.start(timeout: 150)
+      callbacks = %{"slow" => fn [] -> (Process.sleep(300) && {:ok, "done"}) || {:ok, "done"} end}
+
+      assert {:ok, "done"} = ExSafejs.eval(rt, "slow()", callbacks)
+      ExSafejs.stop(rt)
+    end
+
+    test "JS compute around slow callbacks is still bounded" do
+      {:ok, rt} = ExSafejs.start(timeout: 150)
+      callbacks = %{"slow" => fn [] -> (Process.sleep(300) && {:ok, nil}) || {:ok, nil} end}
+
+      assert {:error, %Error{kind: :timeout}} =
+               ExSafejs.eval(rt, "slow(); while(true) {}", callbacks)
+
+      ExSafejs.stop(rt)
+    end
+  end
+
+  describe "host error sanitization" do
+    setup do
+      {:ok, rt} = ExSafejs.start()
+      on_exit(fn -> ExSafejs.stop(rt) end)
+      %{rt: rt}
+    end
+
+    test "guest sees only a generic message for a raised callback", %{rt: rt} do
+      callbacks = %{"blow_up" => fn [] -> raise "secret connection string" end}
+
+      code = "try { blow_up(); } catch (e) { e.message; }"
+
+      assert {:ok, "host function failed"} = ExSafejs.eval(rt, code, callbacks)
+    end
+
+    test "returned {:error, reason} stays guest-visible verbatim", %{rt: rt} do
+      callbacks = %{"fail" => fn [] -> {:error, "quota exceeded"} end}
+
+      code = "try { fail(); } catch (e) { e.message; }"
+
+      assert {:ok, "quota exceeded"} = ExSafejs.eval(rt, code, callbacks)
+    end
+  end
+
+  describe "message hygiene" do
+    test "a timed-out eval leaves no straggler in the caller's mailbox" do
+      {:ok, rt} = ExSafejs.start(timeout: 100)
+
+      assert {:error, %Error{kind: :timeout}} = ExSafejs.eval(rt, "while(true) {}")
+
+      refute_receive {:ex_safejs_result, _, _}, 200
+      refute_receive {:ex_safejs_callback, _, _, _, _}, 0
+
+      # And the very next eval in the same process is clean.
+      assert {:ok, 42} = ExSafejs.eval(rt, "21 * 2")
+      ExSafejs.stop(rt)
+    end
+
+    test "no reserved globals are installed" do
+      {:ok, rt} = ExSafejs.start()
+      callbacks = %{"ping" => fn [] -> {:ok, "pong"} end}
+
+      code = """
+      [
+        typeof __ex_safejs_make_wrapper,
+        typeof __ex_safejs_dispatch,
+        typeof __ex_safejs_cb_args,
+        typeof __ex_safejs_cb_result,
+        ping()
+      ]
+      """
+
+      assert {:ok, ["undefined", "undefined", "undefined", "undefined", "pong"]} =
+               ExSafejs.eval(rt, code, callbacks)
+
+      ExSafejs.stop(rt)
+    end
+
+    test "shadowing a callback's global binding doesn't affect a held reference" do
+      {:ok, rt} = ExSafejs.start()
+      callbacks = %{"ping" => fn [] -> {:ok, "pong"} end}
+
+      code = """
+      const orig = ping;
+      globalThis.ping = () => "fake";
+      orig();
+      """
+
+      assert {:ok, "pong"} = ExSafejs.eval(rt, code, callbacks)
+      ExSafejs.stop(rt)
     end
   end
 

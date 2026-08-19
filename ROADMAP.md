@@ -1,5 +1,13 @@
 # Renovation roadmap
 
+**Status (v0.3.0):** Phases A and B shipped, plus structured errors and the
+non-`Error`-throw/`has_exception` handling from C, lossless BigInt round-trip (the audit found live truncation: 2^53+1
+crossed as ...992.0 and JS BigInts became nil — both fixed, pinned by
+tests), and the configurable `gc_threshold` from D. Still open:
+promise-special-case in conversion,
+unhandled-rejection tracker, `Date.now`/`Math.random` determinism policy,
+interleaved multi-runtime isolation test.
+
 ex_safejs v0.2.0 is quicksand 0.1.1 + the rquickjs 0.12 bump, API-unchanged.
 Now that the API is ours to break, this is the renovation plan. Much of it is
 informed by a source read of **langchain-ai/quickjs-rs** (Python, QuickJS-NG

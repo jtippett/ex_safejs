@@ -9,6 +9,7 @@ use std::time::Duration;
 pub struct CallbackRegistry {
     pending: Mutex<HashMap<u64, mpsc::Sender<CallbackResult>>>,
     next_id: AtomicU64,
+    closed: AtomicBool,
 }
 
 impl CallbackRegistry {
@@ -16,16 +17,22 @@ impl CallbackRegistry {
         Self {
             pending: Mutex::new(HashMap::new()),
             next_id: AtomicU64::new(1),
+            closed: AtomicBool::new(false),
         }
     }
 
     pub fn register(&self) -> (u64, mpsc::Receiver<CallbackResult>) {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         let (tx, rx) = mpsc::channel();
-        self.pending
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .insert(id, tx);
+        // After close(), don't retain the sender: the receiver disconnects
+        // immediately, so a dispatch racing with shutdown errors out instead
+        // of blocking on a response that will never come.
+        if !self.closed.load(Ordering::Relaxed) {
+            self.pending
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .insert(id, tx);
+        }
         (id, rx)
     }
 
@@ -42,11 +49,20 @@ impl CallbackRegistry {
         }
     }
 
+    /// Per-eval cleanup: drop any unanswered entries so a stale respond
+    /// can't cross into a later eval. The registry stays usable.
     pub fn clear(&self) {
         self.pending
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .clear();
+    }
+
+    /// Shutdown: disconnect every waiting dispatch and refuse to retain
+    /// senders for future registrations. Irreversible per registry.
+    pub fn close(&self) {
+        self.closed.store(true, Ordering::Relaxed);
+        self.clear();
     }
 }
 
@@ -85,6 +101,10 @@ impl Drop for Runtime {
     fn drop(&mut self) {
         self.alive.store(false, Ordering::Relaxed);
         self.interrupt.store(true, Ordering::Relaxed);
+        // Disconnect any dispatch closure blocked on a callback response —
+        // e.g. when the Elixir process servicing the eval died — so the
+        // worker can unwind and read the Stop message instead of leaking.
+        self.callbacks.close();
         let (tx, _rx) = mpsc::channel();
         let _ = self.sender.send(worker::Message::Stop(tx));
     }

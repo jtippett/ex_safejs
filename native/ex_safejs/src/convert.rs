@@ -10,6 +10,7 @@ pub enum JsValue {
     Null,
     Bool(bool),
     Int(i64),
+    BigInt(rustler::BigInt),
     Float(f64),
     String(String),
     Array(Vec<JsValue>),
@@ -22,6 +23,7 @@ impl Encoder for JsValue {
             JsValue::Null => rustler::types::atom::nil().encode(env),
             JsValue::Bool(b) => b.encode(env),
             JsValue::Int(n) => n.encode(env),
+            JsValue::BigInt(b) => b.encode(env),
             JsValue::Float(f) => f.encode(env),
             JsValue::String(s) => s.encode(env),
             JsValue::Array(arr) => arr.encode(env),
@@ -35,25 +37,25 @@ impl Encoder for JsValue {
     }
 }
 
-pub enum JsResult {
+pub enum EvalResult {
     Ok(JsValue),
-    Err(String),
+    Err(rustler::Atom, String),
 }
 
-impl From<Result<JsValue, String>> for JsResult {
-    fn from(result: Result<JsValue, String>) -> Self {
+impl From<Result<JsValue, crate::worker::EvalError>> for EvalResult {
+    fn from(result: Result<JsValue, crate::worker::EvalError>) -> Self {
         match result {
-            Ok(val) => JsResult::Ok(val),
-            Err(err) => JsResult::Err(err),
+            Ok(val) => EvalResult::Ok(val),
+            Err(e) => EvalResult::Err(e.kind, e.message),
         }
     }
 }
 
-impl Encoder for JsResult {
+impl Encoder for EvalResult {
     fn encode<'a>(&self, env: Env<'a>) -> Term<'a> {
         match self {
-            JsResult::Ok(val) => (atoms::ok(), val).encode(env),
-            JsResult::Err(msg) => (atoms::error(), msg.as_str()).encode(env),
+            EvalResult::Ok(val) => (atoms::ok(), val).encode(env),
+            EvalResult::Err(kind, msg) => (atoms::error(), (*kind, msg.as_str())).encode(env),
         }
     }
 }
@@ -94,6 +96,24 @@ fn js_to_term_depth<'js>(
             return Ok(JsValue::Int(f as i64));
         }
         return Ok(JsValue::Float(f));
+    }
+
+    // BigInt: lossless — Elixir integers are arbitrary-precision, so never
+    // squeeze one through an f64.
+    if val.is_big_int() {
+        // Always go through the decimal string: rquickjs's BigInt::to_i64
+        // WRAPS modulo 2^64 (JS ToBigInt64 semantics) instead of failing for
+        // out-of-range values, so it cannot be used as a fits-check.
+        let coerced: rquickjs::Coerced<String> = rquickjs::FromJs::from_js(ctx, val.clone())
+            .map_err(|e| format!("BigInt coercion error: {e}"))?;
+        let big: rustler::BigInt = coerced
+            .0
+            .parse()
+            .map_err(|e| format!("BigInt parse error: {e}"))?;
+        return Ok(match i64::try_from(&big) {
+            Ok(n) => JsValue::Int(n),
+            Err(_) => JsValue::BigInt(big),
+        });
     }
 
     if let Some(s) = val.as_string() {
@@ -158,6 +178,7 @@ pub enum TermValue {
     Nil,
     Bool(bool),
     Int(i64),
+    BigInt(rustler::BigInt),
     Float(f64),
     String(String),
     Atom(String),
@@ -197,6 +218,11 @@ fn term_to_intermediate_depth<'a>(term: Term<'a>, depth: u32) -> Result<TermValu
     // float
     if let Ok(f) = term.decode::<f64>() {
         return Ok(TermValue::Float(f));
+    }
+
+    // big integer (beyond i64) — lossless via num-bigint
+    if let Ok(b) = term.decode::<rustler::BigInt>() {
+        return Ok(TermValue::BigInt(b));
     }
 
     // binary/string
@@ -260,10 +286,17 @@ fn intermediate_to_js_depth<'js>(
         TermValue::Int(n) => {
             if *n >= i32::MIN as i64 && *n <= i32::MAX as i64 {
                 Ok(rquickjs::Value::new_int(ctx.clone(), *n as i32))
-            } else {
+            } else if n.abs() <= 9_007_199_254_740_991 {
                 Ok(rquickjs::Value::new_float(ctx.clone(), *n as f64))
+            } else {
+                // Beyond 2^53 an f64 silently truncates; cross as a native
+                // BigInt instead.
+                let b = rquickjs::BigInt::from_i64(ctx.clone(), *n)
+                    .map_err(|e| format!("Failed to create JS BigInt: {e}"))?;
+                Ok(b.into_value())
             }
         }
+        TermValue::BigInt(b) => js_bigint_from_decimal(ctx, &b.to_string()),
         TermValue::Float(f) => Ok(rquickjs::Value::new_float(ctx.clone(), *f)),
         TermValue::String(s) => {
             let js_str = rquickjs::String::from_str(ctx.clone(), s)
@@ -294,6 +327,7 @@ fn intermediate_to_js_depth<'js>(
                     TermValue::String(s) => s.clone(),
                     TermValue::Atom(s) => s.clone(),
                     TermValue::Int(n) => n.to_string(),
+                    TermValue::BigInt(b) => b.to_string(),
                     _ => return Err("Map keys must be strings, atoms, or integers".to_string()),
                 };
                 let val = intermediate_to_js_depth(ctx, v, depth + 1)?;
@@ -303,4 +337,22 @@ fn intermediate_to_js_depth<'js>(
             Ok(obj.into_value())
         }
     }
+}
+
+/// Build a JS BigInt from a decimal string by evaluating a `<digits>n`
+/// literal. Deliberately NOT via the `BigInt` global — the guest can shadow
+/// that, and host-side conversion must not run guest-controlled code. The
+/// string comes from num-bigint's Display impl, so it is digits (with an
+/// optional leading `-`) only.
+fn js_bigint_from_decimal<'js>(
+    ctx: &rquickjs::Ctx<'js>,
+    decimal: &str,
+) -> Result<rquickjs::Value<'js>, String> {
+    debug_assert!(decimal
+        .strip_prefix('-')
+        .unwrap_or(decimal)
+        .bytes()
+        .all(|b| b.is_ascii_digit()));
+    ctx.eval::<rquickjs::Value, _>(format!("{decimal}n"))
+        .map_err(|e| format!("Failed to create JS BigInt: {e}"))
 }

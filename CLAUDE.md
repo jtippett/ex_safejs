@@ -34,26 +34,29 @@ ExSafejs is an Elixir NIF wrapping QuickJS-NG (via `rquickjs` crate) for sandbox
 
 ### Thread Model
 
-Each runtime spawns a dedicated OS thread running a QuickJS worker. Communication happens via `mpsc` channels. The BEAM process never blocks on JS execution directly.
+Each runtime spawns a dedicated OS thread running a QuickJS worker. Communication happens via `mpsc` channels. The BEAM process never blocks on JS execution directly, and the Elixir side owns all timing.
 
 ```
-BEAM Process
-  ├─ eval/2 ──► DirtyIo NIF ──► mpsc channel ──► Worker Thread ──► QuickJS
-  │              blocks on rx     Eval message     clears interrupt, evals
-  │              ◄── result channel ◄──────────────┘
-  │
-  └─ eval/3 ──► NIF sends EvalWithCallbacks, returns {:ok, nil}
-       │         Worker installs dispatch + wrappers, evals
-       ├─ receive {:ex_safejs_callback, id, name, args} ──► call Elixir fun
-       │    └─► NIF respond_callback ──► CallbackRegistry channel ──► Worker resumes
-       └─ receive {:ex_safejs_result, result} ──► return
+BEAM Process (ExSafejs.eval/3)
+  ├─ eval_start NIF ──► mpsc channel ──► Worker Thread
+  │    (returns :ok           Eval{code, fn_names, caller, eval_id}
+  │     immediately)          clears interrupt, installs callback Functions,
+  │                           evals; a promise completion value is DRIVEN:
+  │                           drain jobs → check state → settle (loop);
+  │                           pending + empty queue = deadlock error
+  ├─ receive {:ex_safejs_callback, eval_id, cb_id, name, args}
+  │    └─► run Elixir fun (wall time excluded from the JS deadline)
+  │        └─► respond_callback NIF ──► CallbackRegistry channel ──► dispatch resumes
+  ├─ receive {:ex_safejs_result, eval_id, {:ok, v} | {:error, {kind, msg}}}
+  └─ deadline expiry: interrupt NIF, then ABSORB the late result/callback
+     messages (grace 2s) so no straggler leaks into the caller's mailbox
 ```
 
 ### Callback Mechanism
 
-- `__ex_safejs_dispatch`: Rust native function installed per eval/3 call. Reads args from `__ex_safejs_cb_args` global, sends to Elixir via `send_to_pid`, blocks on `CallbackRegistry` channel for response.
-- `__ex_safejs_make_wrapper`: Persistent JS factory (installed once in `Worker::new`, frozen via `Object.defineProperty`). Creates per-callback wrapper functions that set args global, call dispatch, retrieve result from `__ex_safejs_cb_result` global.
-- Callback names are passed as JS function parameters to the factory, never interpolated into eval'd code (prevents JS injection).
+- Each Elixir callback is installed as a real JS `Function` whose Rust closure captures the callback name, caller pid, eval id, and registry (`make_dispatch` in worker.rs — an `impl for<'js> Fn` so it can return a `Value<'js>`). There are **no reserved globals**; nothing the guest can read or write is on the dispatch path.
+- Dispatch sends `{:ex_safejs_callback, eval_id, cb_id, name, args}` and blocks on the registry channel with **no Rust-side timeout** — Elixir owns timing, and `close()` on stop/Drop disconnects the channel to unblock a stranded dispatch.
+- A callback returning `{:error, reason}` throws a catchable JS `Error` with `reason` verbatim. A callback that **raises** is sanitized: the guest sees `"host function failed"`, and the real exception rides an Elixir-side channel back to the caller as a `:host_error` if the guest doesn't catch it.
 
 ### Type Conversion
 
@@ -65,7 +68,9 @@ JS→Elixir is single-phase: `rquickjs::Value` → `JsValue` enum → Erlang `Te
 
 ### Interrupt / Timeout
 
-The `interrupt` `Arc<AtomicBool>` is shared between the NIF side and the worker. It is always cleared on the **worker side** when starting a new eval (not the NIF side) to avoid a race condition where the flag is cleared before a previous timed-out eval has been interrupted. The QuickJS interrupt handler checks this flag on every loop iteration.
+The `interrupt` `Arc<AtomicBool>` is shared between the NIF side and the worker. It is always cleared on the **worker side** when starting a new eval (not the NIF side) to avoid a race where the flag is cleared before a previous timed-out eval has been interrupted. The QuickJS interrupt handler checks this flag on every loop iteration.
+
+The deadline lives entirely in Elixir (`ExSafejs.await/6`): host-callback wall time is added back to the deadline, so `:timeout` means JS compute budget. Only the deadline (or stop/Drop) sets the interrupt, so a fired interrupt is always honestly classified as `:timeout`.
 
 ### Key Files
 

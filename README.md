@@ -28,8 +28,19 @@ architecture.)
 ## Features
 
 - Sandboxed JS with no filesystem, network, or OS access
-- Configurable memory limit, execution timeout, and stack size
-- Pre-registered Elixir callbacks callable from JS
+- **Async-aware eval**: async arrows, `await`, `.then` chains and
+  `Promise.all` are driven to settlement; a never-settling promise is
+  detected as a `:deadlock` error immediately instead of burning the timeout
+- Configurable memory limit, execution timeout, stack size, and GC threshold
+- The timeout is a **JS compute budget**: time spent inside Elixir callbacks
+  is excluded, so a slow host call never reads as guest misbehavior
+- Structured errors (`%ExSafejs.Error{kind: ...}`) a caller — or an LLM
+  repair loop — can branch on
+- Pre-registered Elixir callbacks callable from JS, installed as real
+  function objects with the dispatch path captured host-side (no reserved
+  globals, nothing the guest writes is on the trust path)
+- Raised callback exceptions are sanitized to the guest (`"host function
+  failed"`) while the real exception reaches the Elixir caller
 - Direct Erlang term <-> JS value conversion (no JSON serialization)
 - Resource-only API (no GenServer overhead)
 
@@ -46,7 +57,7 @@ Add to your `mix.exs`:
 ```elixir
 def deps do
   [
-    {:ex_safejs, "~> 0.2.0"}
+    {:ex_safejs, "~> 0.3.0"}
   ]
 end
 ```
@@ -68,6 +79,13 @@ EX_SAFEJS_BUILD=true mix deps.compile ex_safejs
 {:ok, "hello"} = ExSafejs.eval(rt, "'hello'")
 {:ok, %{"a" => 1}} = ExSafejs.eval(rt, "({a: 1})")
 
+# Async code settles before returning
+{:ok, 3} = ExSafejs.eval(rt, "(async () => 1 + 2)()")
+{:ok, 2} = ExSafejs.eval(rt, "Promise.resolve(1).then(x => x + 1)")
+
+# A promise nothing can settle is reported immediately
+{:error, %ExSafejs.Error{kind: :deadlock}} = ExSafejs.eval(rt, "new Promise(() => {})")
+
 :ok = ExSafejs.stop(rt)
 ```
 
@@ -81,7 +99,7 @@ EX_SAFEJS_BUILD=true mix deps.compile ex_safejs
 )
 
 # Infinite loops are interrupted
-{:error, "timeout"} = ExSafejs.eval(rt, "while(true) {}")
+{:error, %ExSafejs.Error{kind: :timeout}} = ExSafejs.eval(rt, "while(true) {}")
 
 # Runtime remains usable after timeout
 {:ok, 42} = ExSafejs.eval(rt, "42")
@@ -112,10 +130,24 @@ callbacks = %{
 """, callbacks)
 ```
 
+Callbacks work under `await` too — the host call blocks the JS thread and
+is a plain value by the time the guest sees it, so `await fetch_user(1)` and
+`Promise.all([fetch_user(1), fetch_user(2)])` both work (`Promise.all` runs
+the calls serially):
+
+```elixir
+{:ok, "Alice"} = ExSafejs.eval(rt, "(async () => (await fetch_user(1)).name)()", callbacks)
+```
+
 Callbacks must return `{:ok, value}` or `{:error, reason}`:
 
 - `{:ok, value}` — value is converted to JS and returned to the caller
-- `{:error, reason}` — throws a JS exception with the reason as the message
+- `{:error, reason}` — throws a catchable JS `Error` carrying `reason`
+  **verbatim** — never put a secret in it
+- a **raised** exception is different: the guest sees only a generic
+  `"host function failed"` exception, and if it goes uncaught the eval
+  returns `{:error, %ExSafejs.Error{kind: :host_error}}` carrying the real
+  exception message to the Elixir caller only
 
 ```elixir
 callbacks = %{
@@ -148,7 +180,7 @@ ExSafejs.alive?(rt)  # true
 ExSafejs.alive?(rt)  # false
 
 # Eval on stopped runtime returns error (doesn't raise)
-{:error, "dead_runtime"} = ExSafejs.eval(rt, "1")
+{:error, %ExSafejs.Error{kind: :dead_runtime}} = ExSafejs.eval(rt, "1")
 ```
 
 ## API
@@ -165,20 +197,26 @@ ExSafejs.alive?(rt)  # false
 
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
-| `:timeout` | integer (ms) | `30_000` | Max JS execution time per eval |
+| `:timeout` | integer (ms) | `30_000` | Max JS compute time per eval (host-callback time excluded) |
 | `:memory_limit` | integer (bytes) | `268_435_456` (256 MB) | Max JS heap allocation |
 | `:max_stack_size` | integer (bytes) | `1_048_576` (1 MB) | Max JS call stack size |
+| `:gc_threshold` | integer (bytes) | `4_194_304` (4 MB) | GC trigger threshold |
 
-### Reserved global names
+### Errors
 
-When `eval/3` is in callback mode, ex_safejs installs four `globalThis.__ex_safejs_*` properties on the JS runtime to plumb callback dispatch:
+Failures are `{:error, %ExSafejs.Error{kind, message, stack}}` where `kind`
+is one of `:timeout`, `:deadlock`, `:memory_limit`, `:stack_overflow`,
+`:js_error`, `:host_error`, `:dead_runtime`, `:start_failed` — see the
+`ExSafejs.Error` moduledoc. `stack` carries the JS stack trace when the
+engine provided one.
 
-- `__ex_safejs_make_wrapper` — factory that builds the Elixir-callback wrapper functions injected as JS globals.
-- `__ex_safejs_dispatch` — called by the wrapper to message the Elixir process.
-- `__ex_safejs_cb_args` — slot the wrapper writes per-call arguments into.
-- `__ex_safejs_cb_result` — slot Elixir writes the result into.
+### No reserved globals
 
-Don't define these in your user JS — overwriting them silently breaks all Elixir callbacks in that runtime. The leading double-underscore is a convention signaling "implementation detail, don't touch", matching the same convention QuickJS-NG uses internally.
+Callback dispatch is captured host-side, so ex_safejs installs nothing on
+`globalThis` beyond the callback names you register (and removes those after
+each eval). Guest code may shadow or delete a callback's global binding, but
+that only loses its own access — nothing the guest writes is on the dispatch
+path.
 
 ## Type Conversion
 

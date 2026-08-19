@@ -17,13 +17,10 @@ defmodule ExSafejs.Native do
     nif_versions: ["2.15"],
     version: version
 
-  def start_runtime(_ref, _timeout_ms, _memory_limit, _max_stack_size),
+  def start_runtime(_ref, _timeout_ms, _memory_limit, _max_stack_size, _gc_threshold),
     do: :erlang.nif_error(:nif_not_loaded)
 
-  def eval_sync(_resource, _code),
-    do: :erlang.nif_error(:nif_not_loaded)
-
-  def eval_with_callbacks(_resource, _code, _fn_names),
+  def eval_start(_resource, _eval_id, _code, _fn_names),
     do: :erlang.nif_error(:nif_not_loaded)
 
   def respond_callback(_resource, _callback_id, _result),

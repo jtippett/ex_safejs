@@ -3,19 +3,21 @@ mod convert;
 mod runtime;
 mod worker;
 
-use convert::{term_to_intermediate, CallbackResult, JsResult, JsValue};
+use convert::{term_to_intermediate, CallbackResult};
 use rustler::{Env, ResourceArc, Term};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
 #[rustler::nif]
+#[allow(clippy::too_many_arguments)]
 fn start_runtime(
     env: Env,
     start_ref: Term,
     timeout_ms: u64,
     memory_limit: usize,
     max_stack_size: usize,
+    gc_threshold: usize,
 ) -> rustler::Atom {
     let task_pid = env.pid();
     let (sender, receiver) = std::sync::mpsc::channel::<worker::Message>();
@@ -30,6 +32,7 @@ fn start_runtime(
     let opts = worker::WorkerOpts {
         memory_limit,
         max_stack_size,
+        gc_threshold,
     };
 
     std::thread::spawn(move || match worker::Worker::new(opts, interrupt_worker) {
@@ -60,45 +63,35 @@ fn start_runtime(
     atoms::ok()
 }
 
-#[rustler::nif(schedule = "DirtyIo")]
-fn eval_sync(resource: ResourceArc<runtime::Runtime>, code: String) -> JsResult {
-    let (tx, rx) = std::sync::mpsc::channel();
-    if resource.send(worker::Message::Eval(code, tx)).is_err() {
-        return JsResult::Err("dead_runtime".to_string());
-    }
-
-    match rx.recv_timeout(resource.timeout) {
-        Ok(Ok(val)) => JsResult::Ok(val),
-        Ok(Err(err)) => JsResult::Err(err),
-        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
-            resource.interrupt.store(true, Ordering::Relaxed);
-            JsResult::Err("timeout".to_string())
-        }
-        Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
-            JsResult::Err("dead_runtime".to_string())
-        }
-    }
-}
-
+/// Kick off an eval. The result arrives as `{:ex_safejs_result, eval_id,
+/// result}` in the caller's mailbox; callback requests arrive as
+/// `{:ex_safejs_callback, eval_id, cb_id, name, args}`. All timing (the
+/// deadline, host-call time exclusion, interrupting) is owned by the Elixir
+/// side.
 #[rustler::nif]
-fn eval_with_callbacks(
+fn eval_start(
     env: Env,
     resource: ResourceArc<runtime::Runtime>,
+    eval_id: u64,
     code: String,
     fn_names: Vec<String>,
-) -> JsResult {
-    let pid = env.pid();
+) -> rustler::Atom {
+    let caller = env.pid();
     let callbacks = Arc::clone(&resource.callbacks);
-    let timeout = resource.timeout;
+
     if resource
-        .send(worker::Message::EvalWithCallbacks(
-            code, fn_names, callbacks, pid, timeout,
-        ))
+        .send(worker::Message::Eval {
+            code,
+            fn_names,
+            callbacks,
+            caller,
+            eval_id,
+        })
         .is_err()
     {
-        return JsResult::Err("dead_runtime".to_string());
+        return atoms::dead_runtime();
     }
-    JsResult::Ok(JsValue::Null)
+    atoms::ok()
 }
 
 #[rustler::nif]
@@ -156,6 +149,9 @@ fn interrupt(resource: ResourceArc<runtime::Runtime>) -> rustler::Atom {
 fn stop_runtime(resource: ResourceArc<runtime::Runtime>) -> rustler::Atom {
     resource.alive.store(false, Ordering::Relaxed);
     resource.interrupt.store(true, Ordering::Relaxed);
+    // Unblock any dispatch closure waiting on a callback response, so a
+    // wedged or abandoned eval can't keep the worker from seeing Stop.
+    resource.callbacks.close();
     let (tx, rx) = std::sync::mpsc::channel();
     let _ = resource.send(worker::Message::Stop(tx));
     let _ = rx.recv_timeout(resource.timeout);
