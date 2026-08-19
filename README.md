@@ -227,6 +227,7 @@ path.
 | `null`, `undefined` | `nil` |
 | `true`, `false` | `true`, `false` |
 | integer | integer |
+| BigInt | integer (exact, arbitrary precision) |
 | float | float (integer if no fractional part) |
 | string | binary string |
 | Array | list |
@@ -240,7 +241,7 @@ path.
 |--------|------------|
 | `nil` | `null` |
 | `true`, `false` | `true`, `false` |
-| integer | number |
+| integer | number (up to ±2^53); BigInt beyond (exact) |
 | float | number |
 | binary string | string |
 | atom | string |
