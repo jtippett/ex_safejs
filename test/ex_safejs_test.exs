@@ -336,12 +336,18 @@ defmodule ExSafejsTest do
       # cap, and with quickjs-ng 0.15's stricter accounting every later
       # eval then legitimately OOMs too — that's the guest's fault, not a
       # recovery failure.
-      {:ok, rt} = ExSafejs.start(memory_limit: 2 * 1024 * 1024)
+      #
+      # Allocate in ~1MB chunks: when a chunk fails, up to ~1MB of slack is
+      # left under the cap for the engine to build the Error object itself.
+      # With tiny chunks the heap is full to the byte at throw time and the
+      # OOM surfaces as an unallocatable `Thrown value: Null` on some
+      # platforms (seen on Linux x86_64 CI while macOS ARM passed).
+      {:ok, rt} = ExSafejs.start(memory_limit: 8 * 1024 * 1024)
 
       assert {:error, msg} =
                ExSafejs.eval(
                  rt,
-                 "(function() { const arr = []; while(true) { arr.push('x'.repeat(1000)); } })()"
+                 "(function() { const arr = []; while(true) { arr.push('x'.repeat(1 << 20)); } })()"
                )
 
       assert msg =~ "out of memory"

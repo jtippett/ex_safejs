@@ -1,0 +1,40 @@
+name: Publish to Hex
+
+# Manual trigger, deliberately: publishing is the last step of a release,
+# after `./scripts/release.sh` has built the precompiled NIFs and the
+# checksum commit is on main. Publishing with a stale/missing checksum file
+# would ship a package that can't verify its binaries.
+#
+# Requires the `hex` environment with a HEX_API_KEY secret (a hex.pm API key
+# with write permission, from https://hex.pm/dashboard/keys).
+on:
+  workflow_dispatch:
+
+jobs:
+  publish:
+    runs-on: ubuntu-22.04
+    environment: hex
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: erlef/setup-beam@v1
+        with:
+          otp-version: "27"
+          elixir-version: "1.18"
+
+      - name: Fetch deps
+        run: mix deps.get
+
+      - name: Checksum file must exist and cover the current version
+        run: |
+          VERSION=$(sed -n 's/^  @version "\(.*\)"/\1/p' mix.exs | head -n1)
+          test -f checksum-Elixir.ExSafejs.Native.exs
+          grep -q "v${VERSION}-nif" checksum-Elixir.ExSafejs.Native.exs || {
+            echo "checksum file does not mention v${VERSION} — run scripts/release.sh first"
+            exit 1
+          }
+
+      - name: Publish
+        run: mix hex.publish --yes
+        env:
+          HEX_API_KEY: ${{ secrets.HEX_API_KEY }}
