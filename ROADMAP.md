@@ -1,12 +1,29 @@
 # Renovation roadmap
 
-**Status (v0.3.0):** Phases A and B shipped, plus structured errors and the
-non-`Error`-throw/`has_exception` handling from C, lossless BigInt round-trip (the audit found live truncation: 2^53+1
-crossed as ...992.0 and JS BigInts became nil — both fixed, pinned by
-tests), and the configurable `gc_threshold` from D. Still open:
-promise-special-case in conversion,
-unhandled-rejection tracker, `Date.now`/`Math.random` determinism policy,
-interleaved multi-runtime isolation test.
+**Status (v0.3.1):** Phases A and B shipped in 0.3.0; 0.3.1 is a security
+hardening pass after two independent adversarial reviews (an internal opus
+pass and Kimi k3). Now closed:
+
+- **Bounded, interruptible result conversion** — a per-result node budget
+  (`MAX_CONVERT_NODES`) counts real nodes instead of trusting `.length`, so a
+  sparse array (`a.length = 2e9`) or a huge TypedArray can no longer drive
+  O(length) host allocation and OOM-kill the node. `Uint8Array`/`ArrayBuffer`
+  cross as an Elixir binary (one bounded copy), not an N-keyed map.
+- **Eval identity** — a single `EvalControl` (current/cancelled/stopping)
+  scopes both the interrupt and callback dispatch to a specific eval. A
+  callback reference retained across evals is refused immediately; a queued
+  eval's deadline can no longer kill the eval ahead of it or be silently lost
+  into a spinning core; a blocked dispatch polls for cancellation/stop so an
+  abandoned callback can't wedge the worker.
+- **Non-`Error` throws** coerce through JS `String(v)` (no Rust `Debug`, no
+  leaked host pointer); the `i64::MIN` BigInt hole is fixed (`unsigned_abs`);
+  callback-arg conversion failure throws instead of silently becoming `null`;
+  a raised callback the guest catches is still logged; error `kind`
+  classification uses whole-line equality and is documented as a hint.
+
+Still open: thenable (non-`Promise`) completion values still return `%{}`;
+unhandled-rejection tracker; `Date.now`/`Math.random` determinism policy;
+interleaved multi-runtime isolation test; promise-special-case in conversion.
 
 ex_safejs v0.2.0 is quicksand 0.1.1 + the rquickjs 0.12 bump, API-unchanged.
 Now that the API is ours to break, this is the renovation plan. Much of it is

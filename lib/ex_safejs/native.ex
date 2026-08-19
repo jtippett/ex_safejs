@@ -32,7 +32,7 @@ defmodule ExSafejs.Native do
   def is_alive(_resource),
     do: :erlang.nif_error(:nif_not_loaded)
 
-  def interrupt(_resource),
+  def interrupt(_resource, _eval_id),
     do: :erlang.nif_error(:nif_not_loaded)
 
   def stop_runtime(_resource),

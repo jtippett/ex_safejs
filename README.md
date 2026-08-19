@@ -57,7 +57,7 @@ Add to your `mix.exs`:
 ```elixir
 def deps do
   [
-    {:ex_safejs, "~> 0.3.0"}
+    {:ex_safejs, "~> 0.3.1"}
   ]
 end
 ```
@@ -216,7 +216,9 @@ Callback dispatch is captured host-side, so ex_safejs installs nothing on
 `globalThis` beyond the callback names you register (and removes those after
 each eval). Guest code may shadow or delete a callback's global binding, but
 that only loses its own access — nothing the guest writes is on the dispatch
-path.
+path. A callback reference the guest stashes and calls in a *later* eval is
+refused (each dispatch is bound to the eval that installed it), so it can
+neither wedge the runtime nor message an unrelated process.
 
 ## Type Conversion
 
@@ -230,6 +232,7 @@ path.
 | BigInt | integer (exact, arbitrary precision) |
 | float | float (integer if no fractional part) |
 | string | binary string |
+| Uint8Array / ArrayBuffer | binary |
 | Array | list |
 | Object | map (string keys) |
 | function | `nil` |

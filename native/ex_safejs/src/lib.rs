@@ -21,8 +21,11 @@ fn start_runtime(
 ) -> rustler::Atom {
     let task_pid = env.pid();
     let (sender, receiver) = std::sync::mpsc::channel::<worker::Message>();
-    let interrupt = Arc::new(AtomicBool::new(false));
-    let interrupt_worker = Arc::clone(&interrupt);
+    let control = Arc::new(runtime::EvalControl::new());
+    let alive = Arc::new(AtomicBool::new(true));
+    let callbacks = Arc::new(runtime::CallbackRegistry::new());
+    let control_worker = Arc::clone(&control);
+    let alive_worker = Arc::clone(&alive);
     let timeout = Duration::from_millis(timeout_ms);
 
     // Save the ref so we can tag the reply message
@@ -35,30 +38,34 @@ fn start_runtime(
         gc_threshold,
     };
 
-    std::thread::spawn(move || match worker::Worker::new(opts, interrupt_worker) {
-        Ok(mut w) => {
-            let sent = ref_env.send_and_clear(&task_pid, |env| {
-                let ref_term = saved_ref.load(env);
-                (
-                    atoms::ex_safejs_start(),
-                    ref_term,
+    std::thread::spawn(
+        move || match worker::Worker::new(opts, control_worker, alive_worker) {
+            Ok(mut w) => {
+                let sent = ref_env.send_and_clear(&task_pid, |env| {
+                    let ref_term = saved_ref.load(env);
                     (
-                        atoms::ok(),
-                        ResourceArc::new(runtime::Runtime::new(sender, interrupt, timeout)),
-                    ),
-                )
-            });
-            if sent.is_ok() {
-                w.run(receiver);
+                        atoms::ex_safejs_start(),
+                        ref_term,
+                        (
+                            atoms::ok(),
+                            ResourceArc::new(runtime::Runtime::new(
+                                sender, control, alive, callbacks, timeout,
+                            )),
+                        ),
+                    )
+                });
+                if sent.is_ok() {
+                    w.run(receiver);
+                }
             }
-        }
-        Err(msg) => {
-            let _ = ref_env.send_and_clear(&task_pid, |env| {
-                let ref_term = saved_ref.load(env);
-                (atoms::ex_safejs_start(), ref_term, (atoms::error(), msg))
-            });
-        }
-    });
+            Err(msg) => {
+                let _ = ref_env.send_and_clear(&task_pid, |env| {
+                    let ref_term = saved_ref.load(env);
+                    (atoms::ex_safejs_start(), ref_term, (atoms::error(), msg))
+                });
+            }
+        },
+    );
 
     atoms::ok()
 }
@@ -139,16 +146,18 @@ fn is_alive(resource: ResourceArc<runtime::Runtime>) -> bool {
     resource.alive.load(Ordering::Relaxed)
 }
 
+/// Cancel a specific eval by id. Scoped so a queued eval's deadline can
+/// never interrupt the eval running ahead of it.
 #[rustler::nif]
-fn interrupt(resource: ResourceArc<runtime::Runtime>) -> rustler::Atom {
-    resource.interrupt.store(true, Ordering::Relaxed);
+fn interrupt(resource: ResourceArc<runtime::Runtime>, eval_id: u64) -> rustler::Atom {
+    resource.control.cancel(eval_id);
     atoms::ok()
 }
 
 #[rustler::nif(schedule = "DirtyIo")]
 fn stop_runtime(resource: ResourceArc<runtime::Runtime>) -> rustler::Atom {
     resource.alive.store(false, Ordering::Relaxed);
-    resource.interrupt.store(true, Ordering::Relaxed);
+    resource.control.stop();
     // Unblock any dispatch closure waiting on a callback response, so a
     // wedged or abandoned eval can't keep the worker from seeing Stop.
     resource.callbacks.close();

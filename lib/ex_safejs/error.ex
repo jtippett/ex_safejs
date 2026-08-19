@@ -23,8 +23,17 @@ defmodule ExSafejs.Error do
   `message` is the first line of the underlying report; `stack` carries the
   JS stack trace when the engine provided one.
 
-  Kind classification for `:memory_limit`/`:stack_overflow` matches on
-  QuickJS-NG message strings — an upstream contract pinned by tests.
+  ## `kind` is a hint, not a security boundary
+
+  `:timeout`, `:deadlock`, `:host_error`, and `:dead_runtime` are decided
+  host-side and are authoritative. But `:memory_limit` and `:stack_overflow`
+  are classified by matching QuickJS-NG's own message strings, and guest code
+  can throw an `Error` whose message is exactly `"out of memory"` or
+  `"Maximum call stack size exceeded"`. Treat those two as **advisory hints**
+  for logging or an LLM repair loop — never gate a security, billing, or
+  quota decision on them. (Whole-line equality keeps near-misses from
+  matching, but an exact forgery is indistinguishable from the real thing at
+  the message level.)
   """
 
   defexception [:kind, :message, :stack]

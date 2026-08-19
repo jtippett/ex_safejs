@@ -1,7 +1,52 @@
 use crate::atoms;
-use rustler::{Encoder, Env, Term};
+use crate::runtime::EvalControl;
+use rustler::{Binary, Encoder, Env, OwnedBinary, Term};
 
 const MAX_DEPTH: u32 = 64;
+
+/// Hard ceiling on nodes materialized during a single JS→Erlang conversion.
+/// The JS memory cap does NOT bound this: a sparse array (`a.length = 2e9`)
+/// or a large `TypedArray` costs almost nothing in the capped heap but would
+/// otherwise drive O(length) host allocation, killing the node. Counting
+/// real nodes visited (not trusting `.length`) bounds that regardless.
+const MAX_CONVERT_NODES: usize = 2_000_000;
+
+/// Threads a node budget (and, where available, the interrupt flag) through a
+/// conversion so it is both bounded and interruptible.
+pub struct ConvertBudget<'a> {
+    remaining: usize,
+    control: Option<&'a EvalControl>,
+    since_check: usize,
+}
+
+impl<'a> ConvertBudget<'a> {
+    pub fn new(control: Option<&'a EvalControl>) -> Self {
+        Self {
+            remaining: MAX_CONVERT_NODES,
+            control,
+            since_check: 0,
+        }
+    }
+
+    fn charge(&mut self) -> Result<(), String> {
+        if self.remaining == 0 {
+            return Err(format!(
+                "result too large: exceeded {MAX_CONVERT_NODES} elements during conversion"
+            ));
+        }
+        self.remaining -= 1;
+        self.since_check += 1;
+        if self.since_check >= 65_536 {
+            self.since_check = 0;
+            if let Some(c) = self.control {
+                if c.should_interrupt() {
+                    return Err("interrupted during result conversion".to_string());
+                }
+            }
+        }
+        Ok(())
+    }
+}
 
 // ── JS → Erlang ─────────────────────────────────────────────────────────────
 
@@ -13,6 +58,7 @@ pub enum JsValue {
     BigInt(rustler::BigInt),
     Float(f64),
     String(String),
+    Bytes(Vec<u8>),
     Array(Vec<JsValue>),
     Object(Vec<(String, JsValue)>),
 }
@@ -26,6 +72,12 @@ impl Encoder for JsValue {
             JsValue::BigInt(b) => b.encode(env),
             JsValue::Float(f) => f.encode(env),
             JsValue::String(s) => s.encode(env),
+            JsValue::Bytes(b) => {
+                let mut bin = OwnedBinary::new(b.len())
+                    .expect("failed to allocate binary for TypedArray conversion");
+                bin.as_mut_slice().copy_from_slice(b);
+                Binary::from_owned(bin, env).to_term(env)
+            }
             JsValue::Array(arr) => arr.encode(env),
             JsValue::Object(pairs) => {
                 let keys: Vec<Term> = pairs.iter().map(|(k, _)| k.encode(env)).collect();
@@ -63,18 +115,21 @@ impl Encoder for EvalResult {
 pub fn js_to_term<'js>(
     ctx: &rquickjs::Ctx<'js>,
     val: rquickjs::Value<'js>,
+    budget: &mut ConvertBudget,
 ) -> Result<JsValue, String> {
-    js_to_term_depth(ctx, val, 0)
+    js_to_term_depth(ctx, val, 0, budget)
 }
 
 fn js_to_term_depth<'js>(
     ctx: &rquickjs::Ctx<'js>,
     val: rquickjs::Value<'js>,
     depth: u32,
+    budget: &mut ConvertBudget,
 ) -> Result<JsValue, String> {
     if depth > MAX_DEPTH {
         return Err("Maximum nesting depth exceeded".to_string());
     }
+    budget.charge()?;
 
     if val.is_undefined() || val.is_null() {
         return Ok(JsValue::Null);
@@ -127,16 +182,33 @@ fn js_to_term_depth<'js>(
         return Ok(JsValue::Null);
     }
 
+    // Byte-width views (Uint8Array/Int8Array/Uint8ClampedArray) and raw
+    // ArrayBuffers cross as an Elixir binary — one bounded copy, instead of
+    // the N own-keyed-map amplification a numeric-indexed object would cause.
+    if let Ok(ta) = rquickjs::TypedArray::<u8>::from_value(val.clone()) {
+        if let Some(bytes) = ta.as_bytes() {
+            return Ok(JsValue::Bytes(bytes.to_vec()));
+        }
+    }
+    if let Some(ab) = rquickjs::ArrayBuffer::from_value(val.clone()) {
+        if let Some(bytes) = ab.as_bytes() {
+            return Ok(JsValue::Bytes(bytes.to_vec()));
+        }
+    }
+
     if val.is_array() {
         if let Some(obj) = val.as_object() {
-            let length: i32 = obj.get("length").unwrap_or(0);
-            let length = length.max(0) as u32;
+            // Do NOT trust the self-reported length for allocation — a sparse
+            // array reports a huge length cheaply. Cap the reservation; the
+            // per-element budget bounds the actual work.
+            let length: i64 = obj.get("length").unwrap_or(0);
+            let length = length.clamp(0, u32::MAX as i64) as u32;
             let mut result = Vec::with_capacity((length as usize).min(1024));
             for i in 0..length {
                 let item: rquickjs::Value = obj
                     .get(i)
                     .unwrap_or(rquickjs::Value::new_undefined(ctx.clone()));
-                result.push(js_to_term_depth(ctx, item, depth + 1)?);
+                result.push(js_to_term_depth(ctx, item, depth + 1, budget)?);
             }
             return Ok(JsValue::Array(result));
         }
@@ -150,7 +222,7 @@ fn js_to_term_depth<'js>(
                     .get(&*key)
                     .unwrap_or(rquickjs::Value::new_undefined(ctx.clone()));
                 if !v.is_function() {
-                    pairs.push((key, js_to_term_depth(ctx, v, depth + 1)?));
+                    pairs.push((key, js_to_term_depth(ctx, v, depth + 1, budget)?));
                 }
             }
             return Ok(JsValue::Object(pairs));
@@ -286,7 +358,7 @@ fn intermediate_to_js_depth<'js>(
         TermValue::Int(n) => {
             if *n >= i32::MIN as i64 && *n <= i32::MAX as i64 {
                 Ok(rquickjs::Value::new_int(ctx.clone(), *n as i32))
-            } else if n.abs() <= 9_007_199_254_740_991 {
+            } else if n.unsigned_abs() <= 9_007_199_254_740_991 {
                 Ok(rquickjs::Value::new_float(ctx.clone(), *n as f64))
             } else {
                 // Beyond 2^53 an f64 silently truncates; cross as a native
@@ -348,11 +420,18 @@ fn js_bigint_from_decimal<'js>(
     ctx: &rquickjs::Ctx<'js>,
     decimal: &str,
 ) -> Result<rquickjs::Value<'js>, String> {
-    debug_assert!(decimal
-        .strip_prefix('-')
-        .unwrap_or(decimal)
-        .bytes()
-        .all(|b| b.is_ascii_digit()));
+    // This string is fed to ctx.eval; enforce digits-only (with an optional
+    // leading '-') so nothing else can ever reach the evaluator, even if a
+    // future caller passes something other than num-bigint's Display output.
+    if decimal.is_empty()
+        || !decimal
+            .strip_prefix('-')
+            .unwrap_or(decimal)
+            .bytes()
+            .all(|b| b.is_ascii_digit())
+    {
+        return Err("refusing to build BigInt from non-numeric string".to_string());
+    }
     ctx.eval::<rquickjs::Value, _>(format!("{decimal}n"))
         .map_err(|e| format!("Failed to create JS BigInt: {e}"))
 }

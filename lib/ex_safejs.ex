@@ -21,6 +21,8 @@ defmodule ExSafejs do
   that only loses its own access. There are no reserved `__*` globals.
   """
 
+  require Logger
+
   alias ExSafejs.Error
 
   @default_timeout 30_000
@@ -103,21 +105,37 @@ defmodule ExSafejs do
   """
   @spec eval(runtime(), String.t(), map()) :: js_result()
   def eval(runtime, code, callbacks) when is_map(callbacks) do
-    eval_id = System.unique_integer([:positive])
     fn_names = Map.keys(callbacks)
 
-    case ExSafejs.Native.eval_start(runtime, eval_id, code, fn_names) do
-      :ok ->
-        timeout = ExSafejs.Native.get_timeout(runtime)
-        deadline = System.monotonic_time(:millisecond) + timeout
-        await(runtime, eval_id, callbacks, deadline, timeout, nil)
+    cond do
+      not is_binary(code) ->
+        {:error, %Error{kind: :js_error, message: "code must be a string"}}
 
-      :dead_runtime ->
-        {:error, %Error{kind: :dead_runtime, message: "runtime is stopped"}}
+      not Enum.all?(fn_names, &is_binary/1) ->
+        {:error, %Error{kind: :js_error, message: "callback names must be strings"}}
+
+      true ->
+        eval_id = System.unique_integer([:positive])
+
+        case start_eval(runtime, eval_id, code, fn_names) do
+          :ok ->
+            timeout = ExSafejs.Native.get_timeout(runtime)
+            deadline = System.monotonic_time(:millisecond) + timeout
+            await(runtime, eval_id, callbacks, deadline, timeout, nil)
+
+          :dead_runtime ->
+            {:error, %Error{kind: :dead_runtime, message: "runtime is stopped"}}
+        end
     end
+  end
+
+  # Narrow the badarg rescue to the NIF call itself: a stopped-runtime
+  # resource raises :badarg here, but a badarg from anywhere else in the
+  # eval loop must not be mislabelled as a dead runtime.
+  defp start_eval(runtime, eval_id, code, fn_names) do
+    ExSafejs.Native.eval_start(runtime, eval_id, code, fn_names)
   catch
-    :error, :badarg ->
-      {:error, %Error{kind: :dead_runtime, message: "runtime is stopped"}}
+    :error, :badarg -> :dead_runtime
   end
 
   @doc "Check if a runtime is alive."
@@ -154,7 +172,7 @@ defmodule ExSafejs do
         await(runtime, eval_id, callbacks, deadline + elapsed, timeout, host_exc)
     after
       remaining ->
-        ExSafejs.Native.interrupt(runtime)
+        ExSafejs.Native.interrupt(runtime, eval_id)
         absorb(runtime, eval_id, timeout)
     end
   end
@@ -192,21 +210,26 @@ defmodule ExSafejs do
 
             other ->
               # A wrong-shape result is a host bug; don't inspect() host data
-              # into the guest — deliver the detail via the side channel.
+              # into the guest — deliver the detail via the side channel, and
+              # log it so a broken callback is never silently swallowed even
+              # when the guest catches the sanitized exception.
               detail = %RuntimeError{
                 message: "callback #{inspect(name)} returned an invalid result: #{inspect(other)}"
               }
 
+              Logger.warning("ExSafejs: #{Exception.message(detail)}")
               {{:error, @host_failed}, host_exc || detail}
           end
         rescue
           e ->
             # Sanitized to the guest; the real exception rides the side
-            # channel to the Elixir caller (first raise wins).
+            # channel to the Elixir caller (first raise wins). Also logged, so
+            # a callback crash the guest catches doesn't vanish.
             detail = %RuntimeError{
               message: "callback #{inspect(name)} raised: #{Exception.message(e)}"
             }
 
+            Logger.warning("ExSafejs: #{Exception.message(detail)}")
             {{:error, @host_failed}, host_exc || detail}
         end
 
@@ -230,12 +253,17 @@ defmodule ExSafejs do
     restore_host_exception(error, host_exc)
   end
 
+  # These are best-effort HINTS matched on the engine's own message strings.
+  # Guest code can throw an Error whose message is exactly "out of memory",
+  # so :memory_limit / :stack_overflow must never gate a security or quota
+  # decision — see ExSafejs.Error. Whole-line equality (not a prefix) at
+  # least keeps "out of memory lol" from matching by accident.
   defp classify_js(first, stack) do
     cond do
-      String.starts_with?(first, "out of memory") ->
+      first == "out of memory" ->
         %Error{kind: :memory_limit, message: first, stack: stack}
 
-      first =~ "Maximum call stack size exceeded" or first =~ "stack overflow" ->
+      first == "Maximum call stack size exceeded" or first == "stack overflow" ->
         %Error{kind: :stack_overflow, message: first, stack: stack}
 
       true ->

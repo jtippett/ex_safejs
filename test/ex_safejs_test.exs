@@ -672,6 +672,142 @@ defmodule ExSafejsTest do
     end
   end
 
+  describe "callback lifetime and eval identity (review criticals)" do
+    test "a callback retained across evals is refused, not wedging the runtime" do
+      {:ok, rt} = ExSafejs.start(timeout: 1_000)
+      callbacks = %{"ping" => fn [] -> {:ok, "pong"} end}
+
+      assert {:ok, "ok"} = ExSafejs.eval(rt, "globalThis.stash = ping; 'ok'", callbacks)
+
+      # Calling the stale reference in a later eval throws immediately —
+      # NOT a timeout, and the runtime is not bricked.
+      started = System.monotonic_time(:millisecond)
+      assert {:error, %Error{kind: :js_error, message: msg}} = ExSafejs.eval(rt, "stash()")
+      assert System.monotonic_time(:millisecond) - started < 500
+      assert msg =~ "outside the evaluation"
+
+      assert {:ok, 2} = ExSafejs.eval(rt, "1 + 1")
+      ExSafejs.stop(rt)
+    end
+
+    test "one eval's deadline never kills another eval sharing the runtime" do
+      {:ok, rt} = ExSafejs.start(timeout: 300)
+      parent = self()
+
+      # Slow host callback: host-call time is excluded from the JS deadline,
+      # so A must succeed despite running well past 300ms of wall clock.
+      slow = %{"slow" => fn [] -> (Process.sleep(800) && {:ok, 1}) || {:ok, 1} end}
+
+      a =
+        spawn(fn ->
+          send(
+            parent,
+            {:a, ExSafejs.eval(rt, "(async () => { await slow(); return 'A-ok'; })()", slow)}
+          )
+        end)
+
+      # Give A a head start so it owns the worker, then queue B behind it.
+      Process.sleep(50)
+
+      b =
+        spawn(fn ->
+          send(parent, {:b, ExSafejs.eval(rt, "while (true) {}")})
+        end)
+
+      assert_receive {:b, {:error, %Error{kind: :timeout}}}, 2_000
+      assert_receive {:a, {:ok, "A-ok"}}, 2_000
+      _ = {a, b}
+
+      # No core is left spinning and the runtime still works.
+      assert {:ok, 3} = ExSafejs.eval(rt, "1 + 2")
+      ExSafejs.stop(rt)
+    end
+
+    test "killing the caller mid-callback does not harm the node" do
+      parent = self()
+
+      owner =
+        spawn(fn ->
+          {:ok, rt} = ExSafejs.start()
+          send(parent, :started)
+          # Blocks forever in a callback; the owning process (this one) is
+          # about to be killed, and the runtime it solely owns is then GC'd →
+          # Drop → close disconnects the parked dispatch.
+          ExSafejs.eval(rt, "block()", %{"block" => fn [] -> Process.sleep(:infinity) end})
+        end)
+
+      assert_receive :started, 1_000
+      Process.sleep(100)
+      Process.exit(owner, :kill)
+
+      # Schedulers stay healthy: an independent runtime works, and many
+      # start/stop cycles don't exhaust threads.
+      {:ok, rt2} = ExSafejs.start()
+      assert {:ok, 42} = ExSafejs.eval(rt2, "40 + 2")
+      ExSafejs.stop(rt2)
+    end
+  end
+
+  describe "conversion is bounded (node-killer defense)" do
+    test "a sparse array is refused, not materialized" do
+      {:ok, rt} = ExSafejs.start(timeout: 5_000, memory_limit: 8 * 1024 * 1024)
+
+      started = System.monotonic_time(:millisecond)
+
+      assert {:error, %Error{kind: :js_error, message: msg}} =
+               ExSafejs.eval(rt, "let a = []; a.length = 2000000000; a")
+
+      # Bounded work, nowhere near the deadline, and no gigabytes allocated.
+      assert System.monotonic_time(:millisecond) - started < 2_000
+      assert msg =~ "too large"
+
+      assert {:ok, 1} = ExSafejs.eval(rt, "1")
+      ExSafejs.stop(rt)
+    end
+
+    test "a typed array crosses as a binary, cheaply" do
+      {:ok, rt} = ExSafejs.start()
+      assert {:ok, <<1, 2, 3>>} = ExSafejs.eval(rt, "new Uint8Array([1, 2, 3])")
+      assert {:ok, <<0, 0, 0, 0>>} = ExSafejs.eval(rt, "new ArrayBuffer(4)")
+      ExSafejs.stop(rt)
+    end
+
+    test "a large typed array is one bounded binary, not N map keys" do
+      {:ok, rt} = ExSafejs.start(memory_limit: 16 * 1024 * 1024)
+
+      started = System.monotonic_time(:millisecond)
+      assert {:ok, bin} = ExSafejs.eval(rt, "new Uint8Array(1000000).fill(7)")
+      assert byte_size(bin) == 1_000_000
+      assert :binary.first(bin) == 7
+      assert System.monotonic_time(:millisecond) - started < 1_000
+      ExSafejs.stop(rt)
+    end
+  end
+
+  describe "non-Error throws and i64::MIN (review fixes)" do
+    setup do
+      {:ok, rt} = ExSafejs.start()
+      on_exit(fn -> ExSafejs.stop(rt) end)
+      %{rt: rt}
+    end
+
+    test "throw 42 / 'x' / object coerce to strings, no Debug or pointer", %{rt: rt} do
+      assert {:error, %Error{message: "42"}} = ExSafejs.eval(rt, "throw 42")
+      assert {:error, %Error{message: "x"}} = ExSafejs.eval(rt, "throw 'x'")
+
+      assert {:error, %Error{message: msg}} = ExSafejs.eval(rt, "throw {code: 5}")
+      refute msg =~ "Thrown value"
+      refute msg =~ "0x"
+      assert msg =~ "object"
+    end
+
+    test "i64::MIN round-trips as an exact integer, not a float", %{rt: rt} do
+      min = -9_223_372_036_854_775_808
+      callbacks = %{"m" => fn [] -> {:ok, min} end}
+      assert {:ok, ["bigint", ^min]} = ExSafejs.eval(rt, "[typeof m(), m()]", callbacks)
+    end
+  end
+
   describe "property-based: type round-trip" do
     setup do
       {:ok, rt} = ExSafejs.start()

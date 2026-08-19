@@ -68,9 +68,13 @@ JS→Elixir is single-phase: `rquickjs::Value` → `JsValue` enum → Erlang `Te
 
 ### Interrupt / Timeout
 
-The `interrupt` `Arc<AtomicBool>` is shared between the NIF side and the worker. It is always cleared on the **worker side** when starting a new eval (not the NIF side) to avoid a race where the flag is cleared before a previous timed-out eval has been interrupted. The QuickJS interrupt handler checks this flag on every loop iteration.
+Interruption is **eval-scoped** via `EvalControl` (`runtime.rs`): three atomics — `current` (the eval_id the worker is running, 0 when idle), `cancelled` (the last eval_id an Elixir deadline cancelled), and `stopping` (hard stop). The QuickJS interrupt handler fires only when `stopping`, or when `cancelled == current`, so one eval's deadline can never abort another's. On dequeuing an `Eval` the worker `enter`s its id and skips it outright if already cancelled (a queued eval whose deadline fired) — otherwise a stale interrupt would be cleared and lost, leaving a core spinning. `interrupt/2` takes the eval_id; `stop`/`Drop` call `control.stop()`.
 
-The deadline lives entirely in Elixir (`ExSafejs.await/6`): host-callback wall time is added back to the deadline, so `:timeout` means JS compute budget. Only the deadline (or stop/Drop) sets the interrupt, so a fired interrupt is always honestly classified as `:timeout`.
+The deadline lives entirely in Elixir (`ExSafejs.await/6`): host-callback wall time is added back to the deadline, so `:timeout` means JS compute budget. Only a deadline (or stop/Drop) cancels, so a fired interrupt is always honestly classified as `:timeout`.
+
+Callback dispatch carries the same eval identity: `make_dispatch` captures its eval_id and, on invocation, refuses (`control.is_running`) if it is no longer the current eval — killing the retained-callback wedge. A blocked dispatch waits with `recv_timeout(DISPATCH_POLL)` and bails on cancellation/stop/dead-caller, so an abandoned callback cannot park the worker thread forever.
+
+Result and argument conversion is bounded by a per-result node budget (`ConvertBudget`, `convert.rs`) that counts real nodes rather than trusting `.length` and periodically checks the interrupt — a sparse array or oversized TypedArray can no longer drive unbounded host allocation outside the JS memory cap. Byte-width TypedArrays and ArrayBuffers cross as Elixir binaries.
 
 ### Key Files
 
