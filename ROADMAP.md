@@ -25,6 +25,16 @@ Still open: thenable (non-`Promise`) completion values still return `%{}`;
 unhandled-rejection tracker; `Date.now`/`Math.random` determinism policy;
 interleaved multi-runtime isolation test; promise-special-case in conversion.
 
+Still open (from oapi_codemode/ele adoption, 2026-08-19 — P1 downstream):
+**wall-clock deadline option in the engine**. `:timeout` is a compute budget
+excluding host-callback time (by design, phase A), so a guest looping over
+cheap host calls runs unbounded in wall time. Consumers currently bound it
+process-side (oapi_codemode `Executor.SafeJS :wall_clock_ms` kills a
+throwaway worker; ele Task-wraps). The engine could do it losslessly: accept
+`wall_clock_ms`, and on every callback return re-arm the interrupt deadline
+from wall time — the run then ends with a structured `:wall_clock` error
+instead of a killed process, and captured logs survive.
+
 ex_safejs v0.2.0 is quicksand 0.1.1 + the rquickjs 0.12 bump, API-unchanged.
 Now that the API is ours to break, this is the renovation plan. Much of it is
 informed by a source read of **langchain-ai/quickjs-rs** (Python, QuickJS-NG
