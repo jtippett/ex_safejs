@@ -37,7 +37,7 @@ fn start_runtime(
             let sent = ref_env.send_and_clear(&task_pid, |env| {
                 let ref_term = saved_ref.load(env);
                 (
-                    atoms::quicksand_start(),
+                    atoms::ex_safejs_start(),
                     ref_term,
                     (
                         atoms::ok(),
@@ -52,7 +52,7 @@ fn start_runtime(
         Err(msg) => {
             let _ = ref_env.send_and_clear(&task_pid, |env| {
                 let ref_term = saved_ref.load(env);
-                (atoms::quicksand_start(), ref_term, (atoms::error(), msg))
+                (atoms::ex_safejs_start(), ref_term, (atoms::error(), msg))
             });
         }
     });
@@ -162,4 +162,4 @@ fn stop_runtime(resource: ResourceArc<runtime::Runtime>) -> rustler::Atom {
     atoms::ok()
 }
 
-rustler::init!("Elixir.Quicksand.Native");
+rustler::init!("Elixir.ExSafejs.Native");

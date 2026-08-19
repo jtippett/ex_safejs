@@ -1,4 +1,4 @@
-defmodule Quicksand do
+defmodule ExSafejs do
   @moduledoc """
   Sandboxed JavaScript execution via QuickJS-NG.
 
@@ -9,10 +9,10 @@ defmodule Quicksand do
 
   ## Reserved JS globals
 
-  When using `eval/3` in callback mode, quicksand installs four
-  `globalThis.__quicksand_*` properties on the JS runtime:
-  `__quicksand_make_wrapper`, `__quicksand_dispatch`,
-  `__quicksand_cb_args`, `__quicksand_cb_result`. User JavaScript
+  When using `eval/3` in callback mode, ex_safejs installs four
+  `globalThis.__ex_safejs_*` properties on the JS runtime:
+  `__ex_safejs_make_wrapper`, `__ex_safejs_dispatch`,
+  `__ex_safejs_cb_args`, `__ex_safejs_cb_result`. User JavaScript
   must not overwrite these or the callback machinery silently
   breaks for that runtime. See `README.md` for the full list and
   rationale.
@@ -42,11 +42,11 @@ defmodule Quicksand do
     max_stack_size = Keyword.get(opts, :max_stack_size, @default_max_stack_size)
 
     ref = make_ref()
-    Quicksand.Native.start_runtime(ref, timeout, memory_limit, max_stack_size)
+    ExSafejs.Native.start_runtime(ref, timeout, memory_limit, max_stack_size)
 
     receive do
-      {:quicksand_start, ^ref, {:ok, resource}} -> {:ok, resource}
-      {:quicksand_start, ^ref, {:error, reason}} -> {:error, reason}
+      {:ex_safejs_start, ^ref, {:ok, resource}} -> {:ok, resource}
+      {:ex_safejs_start, ^ref, {:error, reason}} -> {:error, reason}
     after
       5_000 -> {:error, :start_timeout}
     end
@@ -55,12 +55,12 @@ defmodule Quicksand do
   @doc """
   Evaluate JavaScript code and return the result.
 
-      {:ok, 3} = Quicksand.eval(rt, "1 + 2")
+      {:ok, 3} = ExSafejs.eval(rt, "1 + 2")
 
   """
   @spec eval(runtime(), String.t()) :: js_result()
   def eval(runtime, code) do
-    Quicksand.Native.eval_sync(runtime, code)
+    ExSafejs.Native.eval_sync(runtime, code)
   end
 
   @doc """
@@ -72,16 +72,16 @@ defmodule Quicksand do
       callbacks = %{
         "add" => fn [a, b] -> {:ok, a + b} end
       }
-      {:ok, 5} = Quicksand.eval(rt, "add(2, 3)", callbacks)
+      {:ok, 5} = ExSafejs.eval(rt, "add(2, 3)", callbacks)
 
   """
   @spec eval(runtime(), String.t(), map()) :: js_result()
   def eval(runtime, code, callbacks) when is_map(callbacks) do
     fn_names = Map.keys(callbacks)
 
-    case Quicksand.Native.eval_with_callbacks(runtime, code, fn_names) do
+    case ExSafejs.Native.eval_with_callbacks(runtime, code, fn_names) do
       {:ok, _} ->
-        timeout = Quicksand.Native.get_timeout(runtime)
+        timeout = ExSafejs.Native.get_timeout(runtime)
         callback_loop(runtime, callbacks, timeout)
 
       {:error, _} = error ->
@@ -92,7 +92,7 @@ defmodule Quicksand do
   @doc "Check if a runtime is alive."
   @spec alive?(runtime()) :: boolean()
   def alive?(runtime) do
-    Quicksand.Native.is_alive(runtime)
+    ExSafejs.Native.is_alive(runtime)
   catch
     :error, :badarg -> false
   end
@@ -100,20 +100,20 @@ defmodule Quicksand do
   @doc "Stop a runtime. Idempotent — safe to call multiple times."
   @spec stop(runtime()) :: :ok
   def stop(runtime) do
-    Quicksand.Native.stop_runtime(runtime)
+    ExSafejs.Native.stop_runtime(runtime)
   catch
     :error, :badarg -> :ok
   end
 
   defp callback_loop(runtime, callbacks, timeout) do
     receive do
-      {:quicksand_result, {:ok, value}} ->
+      {:ex_safejs_result, {:ok, value}} ->
         {:ok, value}
 
-      {:quicksand_result, {:error, reason}} ->
+      {:ex_safejs_result, {:error, reason}} ->
         {:error, reason}
 
-      {:quicksand_callback, id, name, args} ->
+      {:ex_safejs_callback, id, name, args} ->
         result =
           case Map.fetch(callbacks, name) do
             {:ok, fun} ->
@@ -136,11 +136,11 @@ defmodule Quicksand do
           end
 
         result = validate_callback_result(result)
-        Quicksand.Native.respond_callback(runtime, id, result)
+        ExSafejs.Native.respond_callback(runtime, id, result)
         callback_loop(runtime, callbacks, timeout)
     after
       timeout ->
-        Quicksand.Native.interrupt(runtime)
+        ExSafejs.Native.interrupt(runtime)
         {:error, "timeout"}
     end
   end

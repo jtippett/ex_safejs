@@ -1,13 +1,13 @@
-defmodule Quicksand.Native do
+defmodule ExSafejs.Native do
   @moduledoc false
 
   version = Mix.Project.config()[:version]
 
   use RustlerPrecompiled,
-    otp_app: :quicksand,
-    crate: "quicksand",
-    base_url: "https://github.com/lpgauth/quicksand/releases/download/v#{version}",
-    force_build: System.get_env("QUICKSAND_BUILD") in ["1", "true"],
+    otp_app: :ex_safejs,
+    crate: "ex_safejs",
+    base_url: "https://github.com/jtippett/ex_safejs/releases/download/v#{version}",
+    force_build: System.get_env("EX_SAFEJS_BUILD") in ["1", "true"],
     targets: ~w(
       aarch64-apple-darwin
       aarch64-unknown-linux-gnu

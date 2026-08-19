@@ -52,13 +52,13 @@ impl Worker {
         // Defined as non-writable, non-configurable, non-enumerable so
         // user JS cannot overwrite or delete it.
         ctx.with(|ctx| {
-            let factory_code = r#"Object.defineProperty(globalThis, '__quicksand_make_wrapper', {
+            let factory_code = r#"Object.defineProperty(globalThis, '__ex_safejs_make_wrapper', {
                 value: function(name) {
                     return function() {
-                        globalThis.__quicksand_cb_args = Array.from(arguments);
-                        globalThis.__quicksand_dispatch(name);
-                        var r = globalThis.__quicksand_cb_result;
-                        delete globalThis.__quicksand_cb_result;
+                        globalThis.__ex_safejs_cb_args = Array.from(arguments);
+                        globalThis.__ex_safejs_dispatch(name);
+                        var r = globalThis.__ex_safejs_cb_result;
+                        delete globalThis.__ex_safejs_cb_result;
                         return r;
                     };
                 },
@@ -97,7 +97,7 @@ impl Worker {
                     callbacks.clear();
                     send_to_pid(
                         &caller_pid,
-                        (atoms::quicksand_result(), JsResult::from(result)),
+                        (atoms::ex_safejs_result(), JsResult::from(result)),
                     );
                 }
                 Message::Stop(tx) => {
@@ -148,16 +148,16 @@ impl Worker {
         self.ctx.with(|ctx| {
             let globals = ctx.globals();
 
-            // __quicksand_dispatch(name) → string sentinel or throw
-            // JS wrapper stores args in __quicksand_cb_args global before calling.
+            // __ex_safejs_dispatch(name) → string sentinel or throw
+            // JS wrapper stores args in __ex_safejs_cb_args global before calling.
             // Dispatch reads args directly as JS Values via js_to_term (no JSON).
-            // Result is stored in __quicksand_cb_result global (avoids Value lifetime issues).
+            // Result is stored in __ex_safejs_cb_result global (avoids Value lifetime issues).
             let dispatch = Function::new(
                 ctx.clone(),
                 move |ctx: rquickjs::Ctx<'_>, name: String| -> rquickjs::Result<String> {
                     let args_val: rquickjs::Value = ctx
                         .globals()
-                        .get("__quicksand_cb_args")
+                        .get("__ex_safejs_cb_args")
                         .unwrap_or_else(|_| rquickjs::Value::new_undefined(ctx.clone()));
 
                     let callback_args = match js_to_term(&ctx, args_val) {
@@ -170,7 +170,7 @@ impl Worker {
 
                     send_to_pid(
                         &pid,
-                        (atoms::quicksand_callback(), id, name.clone(), callback_args),
+                        (atoms::ex_safejs_callback(), id, name.clone(), callback_args),
                     );
 
                     match rx.recv_timeout(timeout) {
@@ -178,7 +178,7 @@ impl Worker {
                             let js_val = intermediate_to_js(&ctx, &term_value)
                                 .map_err(|_| rquickjs::Error::Exception)?;
                             ctx.globals()
-                                .set("__quicksand_cb_result", js_val)
+                                .set("__ex_safejs_cb_result", js_val)
                                 .map_err(|_| rquickjs::Error::Exception)?;
                             Ok("__ok__".to_string())
                         }
@@ -204,17 +204,17 @@ impl Worker {
                     }
                 },
             )
-            .map_err(|e| format!("Failed to create __quicksand_dispatch: {e}"))?;
+            .map_err(|e| format!("Failed to create __ex_safejs_dispatch: {e}"))?;
 
             globals
-                .set("__quicksand_dispatch", dispatch)
-                .map_err(|e| format!("Failed to set __quicksand_dispatch: {e}"))?;
+                .set("__ex_safejs_dispatch", dispatch)
+                .map_err(|e| format!("Failed to set __ex_safejs_dispatch: {e}"))?;
 
             // Use persistent factory installed in Worker::new.
             // Callback name is passed as a parameter, never interpolated
             // into code, preventing JS injection.
             let make_wrapper: Function = globals
-                .get("__quicksand_make_wrapper")
+                .get("__ex_safejs_make_wrapper")
                 .map_err(|e| format!("Failed to get wrapper factory: {e}"))?;
 
             for fn_name in fn_names {
@@ -234,9 +234,9 @@ impl Worker {
     fn remove_callback_functions(&self, fn_names: &[String]) {
         self.ctx.with(|ctx| {
             let globals = ctx.globals();
-            let _ = globals.remove("__quicksand_dispatch");
-            let _ = globals.remove("__quicksand_cb_args");
-            let _ = globals.remove("__quicksand_cb_result");
+            let _ = globals.remove("__ex_safejs_dispatch");
+            let _ = globals.remove("__ex_safejs_cb_args");
+            let _ = globals.remove("__ex_safejs_cb_result");
             for fn_name in fn_names {
                 let _ = globals.remove(fn_name.as_str());
             }

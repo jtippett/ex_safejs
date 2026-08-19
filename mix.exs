@@ -1,12 +1,12 @@
-defmodule Quicksand.MixProject do
+defmodule ExSafejs.MixProject do
   use Mix.Project
 
-  @version "0.1.1"
-  @source_url "https://github.com/lpgauth/quicksand"
+  @version "0.1.0"
+  @source_url "https://github.com/jtippett/ex_safejs"
 
   def project do
     [
-      app: :quicksand,
+      app: :ex_safejs,
       version: @version,
       elixir: "~> 1.15",
       start_permanent: Mix.env() == :prod,
@@ -40,8 +40,8 @@ defmodule Quicksand.MixProject do
       links: %{"GitHub" => @source_url},
       files: ~w(
         lib
-        native/quicksand/src
-        native/quicksand/Cargo.toml
+        native/ex_safejs/src
+        native/ex_safejs/Cargo.toml
         Cargo.toml
         Cargo.lock
         Cross.toml

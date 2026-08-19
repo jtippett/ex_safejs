@@ -63,9 +63,9 @@ jobs:
         shell: bash
         run: |
           if [ "${{ matrix.job.use-cross }}" = "true" ]; then
-            RUSTLER_NIF_VERSION=${{ matrix.nif }} cross build --release --target ${{ matrix.job.target }} --package quicksand
+            RUSTLER_NIF_VERSION=${{ matrix.nif }} cross build --release --target ${{ matrix.job.target }} --package ex_safejs
           else
-            RUSTLER_NIF_VERSION=${{ matrix.nif }} cargo build --release --target ${{ matrix.job.target }} --package quicksand
+            RUSTLER_NIF_VERSION=${{ matrix.nif }} cargo build --release --target ${{ matrix.job.target }} --package ex_safejs
           fi
 
       - name: Package artifact
@@ -76,13 +76,13 @@ jobs:
           NIF=${{ matrix.nif }}
 
           if [[ "$TARGET" == *"darwin"* ]]; then
-            LIB_FILE="target/${TARGET}/release/libquicksand.dylib"
+            LIB_FILE="target/${TARGET}/release/libex_safejs.dylib"
           else
-            LIB_FILE="target/${TARGET}/release/libquicksand.so"
+            LIB_FILE="target/${TARGET}/release/libex_safejs.so"
           fi
 
           # RustlerPrecompiled expects the file inside the archive to match this name
-          NIF_NAME="libquicksand-v${VERSION}-nif-${NIF}-${TARGET}.so"
+          NIF_NAME="libex_safejs-v${VERSION}-nif-${NIF}-${TARGET}.so"
           cp "${LIB_FILE}" "${NIF_NAME}"
 
           ARCHIVE_NAME="${NIF_NAME}.tar.gz"

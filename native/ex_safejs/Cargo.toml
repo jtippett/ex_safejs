@@ -1,10 +1,10 @@
 [package]
-name = "quicksand"
+name = "ex_safejs"
 version = "0.1.0"
 edition = "2021"
 
 [lib]
-name = "quicksand"
+name = "ex_safejs"
 crate-type = ["cdylib"]
 
 [dependencies]

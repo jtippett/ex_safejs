@@ -8,7 +8,7 @@ on:
 
 env:
   MIX_ENV: test
-  QUICKSAND_BUILD: true
+  EX_SAFEJS_BUILD: true
 
 jobs:
   format:

@@ -1,3 +1,3 @@
 [workspace]
 resolver = "2"
-members = ["native/quicksand"]
+members = ["native/ex_safejs"]

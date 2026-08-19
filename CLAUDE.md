@@ -5,10 +5,10 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## Build & Test Commands
 
 ```bash
-QUICKSAND_BUILD=true mix deps.get  # fetch deps + force local Rust build
-QUICKSAND_BUILD=true mix compile   # build (includes Rust NIF compilation)
-QUICKSAND_BUILD=true mix test      # run all tests
-mix test test/quicksand_test.exs:42  # run single test by line number
+EX_SAFEJS_BUILD=true mix deps.get  # fetch deps + force local Rust build
+EX_SAFEJS_BUILD=true mix compile   # build (includes Rust NIF compilation)
+EX_SAFEJS_BUILD=true mix test      # run all tests
+mix test test/ex_safejs_test.exs:42  # run single test by line number
 mix compile --warnings-as-errors   # build with strict warnings
 mix format                         # format Elixir code
 mix format --check-formatted       # check Elixir formatting
@@ -18,7 +18,7 @@ cargo fmt --check                  # check Rust formatting
 cargo clippy -- -D warnings        # Rust linter
 ```
 
-`QUICKSAND_BUILD=true` is required for local development to force compilation from Rust source instead of downloading precompiled binaries. Without it, `RustlerPrecompiled` will try to fetch binaries from GitHub releases.
+`EX_SAFEJS_BUILD=true` is required for local development to force compilation from Rust source instead of downloading precompiled binaries. Without it, `RustlerPrecompiled` will try to fetch binaries from GitHub releases.
 
 ## Releasing
 
@@ -30,7 +30,7 @@ The script reads the version from `mix.exs`, creates a git tag, waits for the re
 
 ## Architecture
 
-Quicksand is an Elixir NIF wrapping QuickJS-NG (via `rquickjs` crate) for sandboxed JS execution. Resource-only API (no GenServer).
+ExSafejs is an Elixir NIF wrapping QuickJS-NG (via `rquickjs` crate) for sandboxed JS execution. Resource-only API (no GenServer).
 
 ### Thread Model
 
@@ -44,15 +44,15 @@ BEAM Process
   │
   └─ eval/3 ──► NIF sends EvalWithCallbacks, returns {:ok, nil}
        │         Worker installs dispatch + wrappers, evals
-       ├─ receive {:quicksand_callback, id, name, args} ──► call Elixir fun
+       ├─ receive {:ex_safejs_callback, id, name, args} ──► call Elixir fun
        │    └─► NIF respond_callback ──► CallbackRegistry channel ──► Worker resumes
-       └─ receive {:quicksand_result, result} ──► return
+       └─ receive {:ex_safejs_result, result} ──► return
 ```
 
 ### Callback Mechanism
 
-- `__quicksand_dispatch`: Rust native function installed per eval/3 call. Reads args from `__quicksand_cb_args` global, sends to Elixir via `send_to_pid`, blocks on `CallbackRegistry` channel for response.
-- `__quicksand_make_wrapper`: Persistent JS factory (installed once in `Worker::new`, frozen via `Object.defineProperty`). Creates per-callback wrapper functions that set args global, call dispatch, retrieve result from `__quicksand_cb_result` global.
+- `__ex_safejs_dispatch`: Rust native function installed per eval/3 call. Reads args from `__ex_safejs_cb_args` global, sends to Elixir via `send_to_pid`, blocks on `CallbackRegistry` channel for response.
+- `__ex_safejs_make_wrapper`: Persistent JS factory (installed once in `Worker::new`, frozen via `Object.defineProperty`). Creates per-callback wrapper functions that set args global, call dispatch, retrieve result from `__ex_safejs_cb_result` global.
 - Callback names are passed as JS function parameters to the factory, never interpolated into eval'd code (prevents JS injection).
 
 ### Type Conversion
@@ -69,9 +69,9 @@ The `interrupt` `Arc<AtomicBool>` is shared between the NIF side and the worker.
 
 ### Key Files
 
-- `lib/quicksand.ex` — public API, callback receive loop, validation
-- `lib/quicksand/native.ex` — RustlerPrecompiled NIF stubs (set `QUICKSAND_BUILD=true` to compile from source)
-- `native/quicksand/src/lib.rs` — NIF entry points
-- `native/quicksand/src/worker.rs` — worker thread, QuickJS eval, callback dispatch
-- `native/quicksand/src/convert.rs` — bidirectional type conversion (JS ↔ Erlang)
-- `native/quicksand/src/runtime.rs` — Runtime resource, CallbackRegistry, `send_to_pid`
+- `lib/ex_safejs.ex` — public API, callback receive loop, validation
+- `lib/ex_safejs/native.ex` — RustlerPrecompiled NIF stubs (set `EX_SAFEJS_BUILD=true` to compile from source)
+- `native/ex_safejs/src/lib.rs` — NIF entry points
+- `native/ex_safejs/src/worker.rs` — worker thread, QuickJS eval, callback dispatch
+- `native/ex_safejs/src/convert.rs` — bidirectional type conversion (JS ↔ Erlang)
+- `native/ex_safejs/src/runtime.rs` — Runtime resource, CallbackRegistry, `send_to_pid`

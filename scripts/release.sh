@@ -9,7 +9,7 @@ if [ -z "$VERSION" ]; then
   exit 1
 fi
 
-echo "==> Releasing quicksand ${TAG}"
+echo "==> Releasing ex_safejs ${TAG}"
 
 # Check for uncommitted changes
 if [ -n "$(git status --porcelain)" ]; then
@@ -50,12 +50,12 @@ done
 
 if [ -z "$RUN_ID" ]; then
   echo "error: could not find release workflow run"
-  echo "check: https://github.com/lpgauth/quicksand/actions"
+  echo "check: https://github.com/jtippett/ex_safejs/actions"
   exit 1
 fi
 
 echo "==> Watching workflow run ${RUN_ID}..."
-echo "    https://github.com/lpgauth/quicksand/actions/runs/${RUN_ID}"
+echo "    https://github.com/jtippett/ex_safejs/actions/runs/${RUN_ID}"
 gh run watch "$RUN_ID" --exit-status
 
 # Publish draft release
@@ -64,12 +64,12 @@ gh release edit "$TAG" --draft=false
 
 # Generate checksums
 echo "==> Generating checksums..."
-QUICKSAND_BUILD=true mix rustler_precompiled.download Quicksand.Native --all --print
+EX_SAFEJS_BUILD=true mix rustler_precompiled.download ExSafejs.Native --all --print
 
-echo "==> Checksums written to checksum-Elixir.Quicksand.Native.exs"
+echo "==> Checksums written to checksum-Elixir.ExSafejs.Native.exs"
 echo ""
 echo "Next steps:"
-echo "  1. git add checksum-Elixir.Quicksand.Native.exs"
+echo "  1. git add checksum-Elixir.ExSafejs.Native.exs"
 echo "  2. git commit -m 'Add checksums for ${TAG}'"
 echo "  3. git push origin main"
 echo "  4. mix hex.publish"
