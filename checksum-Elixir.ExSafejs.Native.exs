@@ -1,6 +1,6 @@
 %{
-  "libex_safejs-v0.3.0-nif-2.15-aarch64-apple-darwin.so.tar.gz" => "sha256:0f8f730ae05d8fa7df71e8d7be84054124d4faba1d4b270bf2e570e53b264267",
-  "libex_safejs-v0.3.0-nif-2.15-aarch64-unknown-linux-gnu.so.tar.gz" => "sha256:387430d84f996c262d110bd5352a3efafc4c83f33f9dd0cb6ed79a1e1470191c",
-  "libex_safejs-v0.3.0-nif-2.15-x86_64-apple-darwin.so.tar.gz" => "sha256:8f363e3725cedfecdb26c905b17b21db1ff8c80d38a240140b00438d21f00595",
-  "libex_safejs-v0.3.0-nif-2.15-x86_64-unknown-linux-gnu.so.tar.gz" => "sha256:61e0a832b4ece8c6884bbff43c5d21bb81ab63b48198c42d2e8deb3eac6642a8",
+  "libex_safejs-v0.3.1-nif-2.15-aarch64-apple-darwin.so.tar.gz" => "sha256:c39cf8a89a3abd6afb41c70db3e54190d5100ab1a5d608d5556cde59a3f9073d",
+  "libex_safejs-v0.3.1-nif-2.15-aarch64-unknown-linux-gnu.so.tar.gz" => "sha256:ae8eb29dc7cf98830989e748fe4526aed22f9185f70244854565b7d554b536ec",
+  "libex_safejs-v0.3.1-nif-2.15-x86_64-apple-darwin.so.tar.gz" => "sha256:b4371687ddee0d485a576d5619e92548175ee5153040401113d9dde9a0d7bb91",
+  "libex_safejs-v0.3.1-nif-2.15-x86_64-unknown-linux-gnu.so.tar.gz" => "sha256:cc5d798aff5d60ee98d90fc38f92873b60c02a032b2fbdeb937aaf07173890e7",
 }
